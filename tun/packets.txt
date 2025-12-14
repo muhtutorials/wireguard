@@ -1,0 +1,140 @@
+IPv4 Packet Structure
+An IPv4 packet header is 20 to 60 bytes long (usually 20 bytes without options).
+
+ 0               1               2               3
+ 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|Version|  IHL  |Type of Service|          Total Length         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         Identification        |Flags|      Fragment Offset    |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|  Time to Live |    Protocol   |         Header Checksum       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       Source Address                          |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    Destination Address                        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    Options (if IHL > 5)                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+Field Descriptions (IPv4):
+    Version (4 bits) – IP version number (4 for IPv4).
+    IHL (4 bits) – Internet Header Length in 32-bit words. Minimum is 5 (20 bytes). Max is 15 (60 bytes).
+    Type of Service (8 bits) – Originally for QoS (priority, delay, throughput, reliability).
+        Now often used for DSCP (Differentiated Services Code Point) and ECN (Explicit Congestion Notification).
+    Total Length (16 bits) – Total packet length in bytes (header + data). Max: 65,535 bytes.
+    Identification (16 bits) – Unique ID for reassembly of fragmented packets.
+    Flags (3 bits):
+        Bit 0: Reserved (must be 0)
+        Bit 1: Don’t Fragment (DF)
+        Bit 2: More Fragments (MF)
+    Fragment Offset (13 bits) – Offset of this fragment in 8-byte units, relative to the original packet.
+    Time to Live (8 bits) – Hop limit; decremented by each router. Packet discarded if TTL reaches 0.
+    Protocol (8 bits) – Identifies the next-level protocol (e.g., 6 = TCP, 17 = UDP, 1 = ICMP).
+    Header Checksum (16 bits) – Error-checking for the header only (recomputed at each hop).
+    Source Address (32 bits) – IPv4 address of sender.
+    Destination Address (32 bits) – IPv4 address of receiver.
+    Options (variable) – Optional fields (security, record route, timestamp, etc.). Rarely used today.
+
+--------------------------------------------------------------------------------------------------------
+
+IPv6 Packet Structure
+IPv6 header is fixed at 40 bytes (simpler, no options in main header; options go in extension headers).
+
+ 0               1               2               3
+ 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|Version| Traffic Class |           Flow Label                  |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         Payload Length        |  Next Header  |   Hop Limit   |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
++                                                               +
+|                                                               |
++                         Source Address                        +
+|                                                               |
++                                                               +
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
++                                                               +
+|                                                               |
++                      Destination Address                      +
+|                                                               |
++                                                               +
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+Field Descriptions (IPv6):
+    Version (4 bits) – IP version number (6 for IPv6).
+    Traffic Class (8 bits) – Similar to IPv4’s DSCP/ECN for QoS.
+    Flow Label (20 bits) – Identifies packets belonging to the same flow (for QoS).
+    Payload Length (16 bits) – Length of the payload (extension headers + data) in bytes. If 0, payload may be larger (jumbogram option).
+    Next Header (8 bits) – Identifies the type of the next header (could be transport layer protocol like TCP/UDP, or an extension header).
+    Hop Limit (8 bits) – Same as TTL in IPv4.
+    Source Address (128 bits) – IPv6 address of sender.
+    Destination Address (128 bits) – IPv6 address of receiver.
+
+--------------------------------------------------------------------------------------------------------
+
+UDP (User Datagram Protocol)
+
+ 0               1               2               3
+ 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|          Source Port          |       Destination Port        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|            Length             |           Checksum            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                             Data                              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+Key UDP Header Fields:
+    Source Port (16 bits): Optional, 0 if unused
+    Destination Port (16 bits): Receiver's port
+    Length (16 bits): UDP header + data length in bytes
+    Checksum (16 bits): Optional (IPv4), mandatory (IPv6)
+    Data: Payload
+
+--------------------------------------------------------------------------------------------------------
+
+TCP (Transmission Control Protocol)
+
+ 0               1               2               3
+ 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|          Source Port          |       Destination Port        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                        Sequence Number                        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    Acknowledgment Number                      |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|  Data |           |U|A|P|R|S|F|                               |
+| Offset| Reserved  |R|C|S|S|Y|I|            Window             |
+|       |           |G|K|H|T|N|N|                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|           Checksum            |         Urgent Pointer        |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    Options (if Data Offset > 5)               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                             Data                              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+Key TCP Header Fields:
+    Source Port (16 bits): Sender's port
+    Destination Port (16 bits): Receiver's port
+    Sequence Number (32 bits): Byte position in data stream
+    Acknowledgment Number (32 bits): Next expected byte
+    Data Offset (4 bits): Header length in 32-bit words
+    Control Flags (6 bits):
+        URG: Urgent pointer valid
+        ACK: Acknowledgment valid
+        PSH: Push function
+        RST: Reset connection
+        SYN: Synchronize sequence numbers
+        FIN: End of data
+    Window Size (16 bits): Receiver's buffer size
+    Checksum (16 bits): Header + data integrity check
+    Urgent Pointer (16 bits): Points to urgent data
+    Options (0-40 bytes): Variable options (MSS, window scaling, etc.)
+    Data: Actual payload
