@@ -5,10 +5,9 @@ import (
 	"math/bits"
 )
 
-// TODO: understand this code
 func checksumNoFold(b []byte, initial uint64) uint64 {
 	tmp := make([]byte, 8)
-	// initial is a starting checksum value
+	// initial is starting checksum value
 	binary.NativeEndian.PutUint64(tmp, initial)
 	ac := binary.BigEndian.Uint64(tmp)
 	var carry uint64
@@ -82,18 +81,23 @@ func checksumNoFold(b []byte, initial uint64) uint64 {
 	return binary.BigEndian.Uint64(tmp)
 }
 
-func checksum(b []byte, initial uint64) uint64 {
+// TODO: look into one's complement arithmetic
+func checksum(b []byte, initial uint64) uint16 {
 	ac := checksumNoFold(b, initial)
 	ac = (ac >> 16) + (ac & 0xffff)
 	ac = (ac >> 16) + (ac & 0xffff)
 	ac = (ac >> 16) + (ac & 0xffff)
 	ac = (ac >> 16) + (ac & 0xffff)
-	return uint64(ac)
+	return uint16(ac)
 }
 
-func pseudoHeaderChecksumNoFold(protocol uint8, srcAddr, dstAddr []byte, totalLen uint16) uint64 {
+// pseudoHeaderChecksumNoFold calculates IP header checksum.
+// It's called "pseudo" because not all header fields are
+// included in the calculation (only 4). 
+func pseudoHeaderChecksumNoFold(srcAddr, dstAddr []byte, protocol uint8, totalLen uint16) uint64 {
 	sum := checksumNoFold(srcAddr, 0)
 	sum = checksumNoFold(dstAddr, sum)
+	// protocol is TCP or UDP
 	sum = checksumNoFold([]byte{0, protocol}, sum)
 	tmp := make([]byte, 2)
 	binary.BigEndian.PutUint16(tmp, totalLen)

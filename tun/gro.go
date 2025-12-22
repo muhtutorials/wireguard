@@ -2,11 +2,14 @@
 package tun
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"unsafe"
 
 	"github.com/muhtutorials/wireguard/conn"
+	"golang.org/x/sys/unix"
 )
 
 // flags are in the 14th byte of a TCP header
@@ -48,20 +51,15 @@ type virtioNetHdr struct {
 	// VIRTIO_NET_HDR_GSO_TCPV6: TCP/IPv6 segmentation
 	// VIRTIO_NET_HDR_GSO_ECN: TCP with ECN (Explicit Congestion Notification)
 	gsoType uint8
-	// Header length - for GSO packets:
-	// Length of headers before payload starts
-	// Includes Ethernet + IP + TCP/UDP headers
-	// Device should copy these headers to each segment
+	// length of headers before payload starts (IP + TCP/UDP headers)
 	hdrLen uint16
 	// Maximum Segment Size for GSO:
 	// Maximum size of each segment after segmentation
 	// Excludes headers (payload only)
 	// Example: gsoSize = 1448 for MTU 1500 (1500 - 52 headers)
 	gsoSize uint16
-	// Checksum start offset from beginning of packet:
-	// Position where checksum calculation should begin
-	// Usually points to IP header (after Ethernet header)
-	// Example: Ethernet(14) → csumStart = 14
+	// offset where TCP/UDP header begins,
+	// which equals the length of the IP header
 	csumStart uint16
 	// Checksum field offset from csumStart:
 	// Position of checksum field within the protocol header
@@ -362,4 +360,734 @@ func udpPacketsCanCoalesce(pkt []byte, iphLen uint8, gsoSize uint16, item udpGRO
 		return coalesceUnavailable
 	}
 	return coalesceAppend
+}
+
+// tcpPacketsCanCoalesce evaluates if pkt can be coalesced with the packet
+// described by item. This function makes considerations that match the kernel's
+// GRO self tests, which can be found in tools/testing/selftests/net/gro.c.
+func tcpPacketsCanCoalesce(pkt []byte, iphLen, tcphLen uint8, seq uint32, pshSet bool, gsoSize uint16, item tcpGROItem, bufs [][]byte, bufsOffset int) canCoalesce {
+	pktTarget := bufs[item.bufsIndex][bufsOffset:]
+	if tcphLen != item.tcphLen {
+		// cannot coalesce with unequal tcp options len
+		return coalesceUnavailable
+	}
+	// check if header has options
+	if tcphLen > 20 {
+		// check if options are equal
+		if !bytes.Equal(pkt[iphLen+20:iphLen+tcphLen], pktTarget[item.iphLen+20:iphLen+tcphLen]) {
+			// cannot coalesce with unequal tcp options
+			return coalesceUnavailable
+		}
+	}
+	if !ipHeadersCanCoalesce(pkt, pktTarget) {
+		return coalesceUnavailable
+	}
+	// seq adjacency.
+	// lhsLen is left-hand side length.
+	// numMerged is number of packets merged into first item packet.
+	lhsLen := item.gsoSize + item.gsoSize*item.numMerged
+	if seq == item.sentSeq+uint32(lhsLen) { // pkt aligns following item from a seq num perspective
+		// The PSH (Push) flag is a 1-bit field in the TCP header that signals the receiver to
+		// immediately deliver the data to the application layer instead of buffering it.
+		if item.pshSet {
+			// We cannot append to a segment that has the PSH flag set, PSH
+			// can only be set on the final segment in a reassembled group.
+			return coalesceUnavailable
+		}
+		// check if the last appended packet's payload is smaller than gsoSize
+		if len(pktTarget[iphLen+tcphLen:])%int(item.gsoSize) != 0 {
+			// A smaller than gsoSize packet has been appended previously.
+			// Nothing can come after a smaller packet on the end.
+			return coalesceUnavailable
+		}
+		// gsoSize can be equal or smaller than item.gsoSize.
+		// Smaller only if it's the last packet:
+		// Buffer: [1460][1460][800] (gsoSize = 1460)
+		if gsoSize > item.gsoSize {
+			// We cannot have a larger packet following a smaller one.
+			return coalesceUnavailable
+		}
+		return coalesceAppend
+	} else if seq+uint32(gsoSize) == item.sentSeq { // pkt aligns in front of item from a seq num perspective
+		if pshSet {
+			// We cannot prepend with a segment that has the PSH flag set, PSH
+			// can only be set on the final segment in a reassembled group.
+			return coalesceUnavailable
+		}
+		if gsoSize < item.gsoSize {
+			// We cannot have a larger packet following a smaller one.
+			return coalesceUnavailable
+		}
+		if gsoSize > item.gsoSize && item.numMerged > 0 {
+			// There's at least one previous merge, and we're larger than all
+			// previous. This would put multiple smaller packets on the end.
+			return coalesceUnavailable
+		}
+		return coalescePrepend
+	}
+	return coalesceUnavailable
+}
+
+const (
+	ipv4SrcAddrOffset = 12
+	ipv6SrcAddrOffset = 8
+	maxUint16         = 1<<16 - 1
+)
+
+func checksumValid(pkt []byte, iphLen, protocol uint8, isV6 bool) bool {
+	srcAddrAt := ipv4SrcAddrOffset
+	addrSize := 4
+	if isV6 {
+		srcAddrAt = ipv6SrcAddrOffset
+		addrSize = 16
+	}
+	srcAddr := pkt[srcAddrAt : srcAddrAt+addrSize]
+	dstAddr := pkt[srcAddrAt+addrSize : srcAddrAt+addrSize+addrSize]
+	// total length field in IP header
+	totalLen := uint16(len(pkt) - int(iphLen))
+	// protocol arg is TCP or UDP
+	headerChecksum := pseudoHeaderChecksumNoFold(srcAddr, dstAddr, protocol, totalLen)
+	return ^checksum(pkt[iphLen:], headerChecksum) == 0
+}
+
+// coalesceResult represents the result of attempting to coalesce two TCP
+// packets.
+type coalesceResult int
+
+const (
+	coalesceInsufficientCap coalesceResult = iota
+	coalescePSHEnding
+	coalesceItemInvalidChecksum
+	coalescePktInvalidChecksum
+	coalesceSuccess
+)
+
+// coalesceUDPPackets attempts to coalesce pkt with the packet described by
+// item, and returns the outcome.
+func coalesceUDPPackets(pkt []byte, item *udpGROItem, bufs [][]byte, bufsOffset int, isV6 bool) coalesceResult {
+	// bufsOffset is the index at which item (coalesced packets) starts.
+	// pktHead are packets that have already been merged.
+	pktHead := bufs[item.bufsIndex][bufsOffset:] // the packet that will end up at the front
+	headersLen := item.iphLen + udphLen
+	// previous coalesced packets plus new packet without headers (just payload)
+	newLen := len(pktHead) + len(pkt) - int(headersLen)
+	// TODO: Why do we subtract bufsOffset? Is this a bug?
+	if cap(pktHead)-bufsOffset < newLen {
+		// We don't want to allocate a new underlying array if capacity is
+		// too small.
+		return coalesceInsufficientCap
+	}
+	// Only validate checksum once per flow item.
+	// Cache the result (cSumKnownInvalid) to avoid recomputation.
+	// Skip validation for already-merged packets (they were validated when first added).
+	if item.numMerged == 0 {
+		if item.cSumKnownInvalid || !checksumValid(pktHead, item.iphLen, unix.IPPROTO_UDP, isV6) {
+			return coalesceItemInvalidChecksum
+		}
+	}
+	if !checksumValid(pkt, item.iphLen, unix.IPPROTO_UDP, isV6) {
+		return coalescePktInvalidChecksum
+	}
+	extendBy := len(pkt) - int(headersLen)
+	bufs[item.bufsIndex] = append(bufs[item.bufsIndex], make([]byte, extendBy)...)
+	copy(bufs[item.bufsIndex][bufsOffset+len(pktHead):], pkt[headersLen:])
+	item.numMerged++
+	return coalesceSuccess
+}
+
+// coalesceTCPPackets attempts to coalesce pkt with the packet described by
+// item, and returns the outcome. This function may swap bufs elements in the
+// event of a prepend as item's bufs index is already being tracked for writing
+// to a Device.
+func coalesceTCPPackets(mode canCoalesce, pkt []byte, pktBufsIndex int, gsoSize uint16, seq uint32, pshSet bool, item *tcpGROItem, bufs [][]byte, bufsOffset int, isV6 bool) coalesceResult {
+	var pktHead []byte // the packet that will end up at the front
+	headersLen := item.iphLen + item.tcphLen
+	newLen := len(bufs[item.bufsIndex][bufsOffset:]) + len(pkt) - int(headersLen)
+	// copy data
+	if mode == coalescePrepend {
+		pktHead = pkt
+		// TODO: How can cap(pkt) > newLen.
+		if cap(pkt)-bufsOffset < newLen {
+			// We don't want to allocate a new underlying array if capacity is
+			// too small.
+			return coalesceInsufficientCap
+		}
+		if pshSet {
+			return coalescePSHEnding
+		}
+		if item.numMerged == 0 {
+			if !checksumValid(bufs[item.bufsIndex][bufsOffset:], item.iphLen, unix.IPPROTO_TCP, isV6) {
+				return coalesceItemInvalidChecksum
+			}
+		}
+		if !checksumValid(pkt, item.iphLen, unix.IPPROTO_TCP, isV6) {
+			return coalescePktInvalidChecksum
+		}
+		item.sentSeq = seq
+		extendBy := newLen - len(pktHead)
+		bufs[pktBufsIndex] = append(bufs[pktBufsIndex], make([]byte, extendBy)...)
+		copy(bufs[pktBufsIndex][bufsOffset+len(pkt):], bufs[item.bufsIndex][bufsOffset+int(headersLen):])
+		// Flip the slice headers in bufs as part of prepend. The index of item
+		// is already being tracked for writing.
+		// TODO: Look into this later.
+		bufs[item.bufsIndex], bufs[pktBufsIndex] = bufs[pktBufsIndex], bufs[item.bufsIndex]
+	} else {
+		pktHead = bufs[item.bufsIndex][bufsOffset:]
+		// TODO: Why do we subtract bufsOffset? Is this a bug?
+		if cap(pktHead)-bufsOffset < newLen {
+			// We don't want to allocate a new underlying array if capacity is
+			// too small.
+			return coalesceInsufficientCap
+		}
+		if item.numMerged == 0 {
+			if !checksumValid(bufs[item.bufsIndex][bufsOffset:], item.iphLen, unix.IPPROTO_TCP, isV6) {
+				return coalesceItemInvalidChecksum
+			}
+		}
+		if !checksumValid(pkt, item.iphLen, unix.IPPROTO_TCP, isV6) {
+			return coalescePktInvalidChecksum
+		}
+		if pshSet {
+			// We are appending a segment with PSH set.
+			item.pshSet = pshSet
+			pktHead[item.iphLen+tcpFlagsOffset] |= tcpFlagPSH
+		}
+		extendBy := len(pkt) - int(headersLen)
+		bufs[item.bufsIndex] = append(bufs[item.bufsIndex], make([]byte, extendBy)...)
+		copy(bufs[item.bufsIndex][bufsOffset+len(pktHead):], pkt[headersLen:])
+	}
+	// TODO: Why is this allowed? It contradicts tcpPacketsCanCoalesce.
+	if gsoSize > item.gsoSize {
+		item.gsoSize = gsoSize
+	}
+	item.numMerged++
+	return coalesceSuccess
+}
+
+const (
+	ipv4FlagMoreFragments uint8 = 0x20
+)
+
+type groResult int
+
+const (
+	groResultNoop groResult = iota
+	groResultTableInsert
+	groResultCoalesced
+)
+
+// tcpGRO evaluates the TCP packet at pktBufsIndex in bufs for coalescing with
+// existing packets tracked in table. It returns a groResultNoop when no
+// action was taken, groResultTableInsert when the evaluated packet was
+// inserted into table, and groResultCoalesced when the evaluated packet was
+// coalesced with another packet in table.
+func tcpGRO(bufs [][]byte, offset int, pktBufsIndex int, table *tcpGROTable, isV6 bool) groResult {
+	// TODO: why is packet at the tail of a slice?
+	pkt := bufs[pktBufsIndex][offset:]
+	// IP header's total length (header + payload) field is 16 bits
+	// which have max value of 65535
+	if len(pkt) > maxUint16 {
+		// A valid IPv4 or IPv6 packet will never exceed this.
+		return groResultNoop
+	}
+	// Extract IHL from IPv4 header which is the first 4 bits in the first byte:
+	// 			0
+	//  0 1 2 3 4 5 6 7
+	// +-+-+-+-+-+-+-+-+
+	// |Version|  IHL  |
+	// +-+-+-+-+-+-+-+-+
+	// iphLen = IHL × 4
+	iphLen := int((pkt[0] & 0x0F) * 4)
+	if isV6 {
+		// header is always 40 bytes in IPv6
+		iphLen = 40
+		ipv6PayloadLen := int(binary.BigEndian.Uint16(pkt[4:]))
+		if ipv6PayloadLen != len(pkt)-iphLen {
+			return groResultNoop
+		}
+	} else {
+		// extract Total Length (header + data) from IPv4 header
+		totalLen := int(binary.BigEndian.Uint16(pkt[2:]))
+		if totalLen != len(pkt) {
+			return groResultNoop
+		}
+	}
+	if len(pkt) < iphLen {
+		return groResultNoop
+	}
+	// Extract Data Offset field which is 13th byte in the header.
+	// The field takes four high bits in the byte.
+	tcphLen := int((pkt[iphLen+12] >> 4) * 4)
+	if tcphLen < 20 || tcphLen > 60 {
+		return groResultNoop
+	}
+	if len(pkt) < iphLen+tcphLen {
+		return groResultNoop
+	}
+	if !isV6 {
+		if pkt[6]&ipv4FlagMoreFragments != 0 || pkt[6]<<3 != 0 || pkt[7] != 0 {
+			// no GRO support for fragmented segments for now
+			return groResultNoop
+		}
+	}
+	tcpFlags := pkt[iphLen+tcpFlagsOffset]
+	var pshSet bool
+	// When ACK=1:
+	// 	Acknowledgment Number field is valid.
+	// 	Receiver is acknowledging received data.
+	// 	Normal data transfer mode.
+	// When ACK=0:
+	// 	Acknowledgment Number field should be ignored.
+	// 	Only during connection initiation (SYN) or termination (RST).
+	//
+	// not a candidate if any non-ACK flags (except PSH+ACK) are set
+	if tcpFlags != tcpFlagACK {
+		if tcpFlags != tcpFlagACK|tcpFlagPSH {
+			return groResultNoop
+		}
+		pshSet = true
+	}
+	gsoSize := uint16(len(pkt) - iphLen - tcphLen)
+	// not a candidate if payload len is 0
+	if gsoSize < 1 {
+		return groResultNoop
+	}
+	seq := binary.BigEndian.Uint32(pkt[iphLen+4:])
+	srcAddrOffset := ipv4SrcAddrOffset
+	addrLen := 4
+	if isV6 {
+		srcAddrOffset = ipv6SrcAddrOffset
+		addrLen = 16
+	}
+	items, existing := table.lookupOrInsert(pkt, srcAddrOffset, srcAddrOffset+addrLen, iphLen, tcphLen, pktBufsIndex)
+	if !existing {
+		return groResultTableInsert
+	}
+	for i := len(items) - 1; i >= 0; i-- {
+		// In the best case of packets arriving in order iterating in reverse is
+		// more efficient if there are multiple items for a given flow. This
+		// also enables a natural table.deleteAt() in the
+		// coalesceItemInvalidChecksum case without the need for index tracking.
+		// This algorithm makes the best effort to coalesce in the event of
+		// unordered packets, where pkt may land anywhere in items from a
+		// sequence number perspective, however once an item is inserted into
+		// the table it is never compared across other items later.
+		item := items[i]
+		can := tcpPacketsCanCoalesce(pkt, uint8(iphLen), uint8(tcphLen), seq, pshSet, gsoSize, item, bufs, offset)
+		if can != coalesceUnavailable {
+			result := coalesceTCPPackets(can, pkt, pktBufsIndex, gsoSize, seq, pshSet, &item, bufs, offset, isV6)
+			switch result {
+			case coalesceSuccess:
+				table.updateAt(item, i)
+				return groResultCoalesced
+			case coalesceItemInvalidChecksum:
+				// delete the item with an invalid checksum
+				table.deleteAt(item.key, i)
+			case coalescePktInvalidChecksum:
+				// no point in inserting an item that we can't coalesce
+				return groResultNoop
+			}
+		}
+	}
+	// failed to coalesce with any other packets; store the item in the flow
+	table.insert(pkt, srcAddrOffset, srcAddrOffset+addrLen, iphLen, tcphLen, pktBufsIndex)
+	return groResultTableInsert
+}
+
+// udpGRO evaluates the UDP packet at pktBufsIndex in bufs for coalescing with
+// existing packets tracked in table. It returns a groResultNoop when no
+// action was taken, groResultTableInsert when the evaluated packet was
+// inserted into table, and groResultCoalesced when the evaluated packet was
+// coalesced with another packet in table.
+func udpGRO(bufs [][]byte, offset int, pktBufsIndex int, table *udpGROTable, isV6 bool) groResult {
+	pkt := bufs[pktBufsIndex][offset:]
+	// IP header's total length (header + payload) field is 16 bits
+	// which has max value of 65535
+	if len(pkt) > maxUint16 {
+		// A valid IPv4 or IPv6 packet will never exceed this.
+		return groResultNoop
+	}
+	// Extract IHL from IPv4 header which is the first 4 bits in the first byte:
+	// 			0
+	//  0 1 2 3 4 5 6 7
+	// +-+-+-+-+-+-+-+-+
+	// |Version|  IHL  |
+	// +-+-+-+-+-+-+-+-+
+	// iphLen = IHL × 4
+	iphLen := int((pkt[0] & 0x0F) * 4)
+	if isV6 {
+		// header is always 40 bytes in IPv6
+		iphLen = 40
+		ipv6PayloadLen := int(binary.BigEndian.Uint16(pkt[4:]))
+		if ipv6PayloadLen != len(pkt)-iphLen {
+			return groResultNoop
+		}
+	} else {
+		totalLen := int(binary.BigEndian.Uint16(pkt[2:]))
+		if totalLen != len(pkt) {
+			return groResultNoop
+		}
+	}
+	if len(pkt) < iphLen {
+		return groResultNoop
+	}
+	if len(pkt) < iphLen+udphLen {
+		return groResultNoop
+	}
+	if !isV6 {
+		if pkt[6]&ipv4FlagMoreFragments != 0 || pkt[6]<<3 != 0 || pkt[7] != 0 {
+			// no GRO support for fragmented segments for now
+			return groResultNoop
+		}
+	}
+	gsoSize := uint16(len(pkt) - iphLen - udphLen)
+	// not a candidate if payload len is 0
+	if gsoSize < 1 {
+		return groResultNoop
+	}
+	srcAddrOffset := ipv4SrcAddrOffset
+	addrLen := 4
+	if isV6 {
+		srcAddrOffset = ipv6SrcAddrOffset
+		addrLen = 16
+	}
+	items, existing := table.lookupOrInsert(pkt, srcAddrOffset, srcAddrOffset+addrLen, iphLen, pktBufsIndex)
+	if !existing {
+		return groResultTableInsert
+	}
+	// With UDP we only check the last item, otherwise we could reorder packets
+	// for a given flow. We must also always insert a new item, or successfully
+	// coalesce with an existing item, for the same reason.
+	item := items[len(items)-1]
+	can := udpPacketsCanCoalesce(pkt, uint8(iphLen), gsoSize, item, bufs, offset)
+	var pktChecksumKnownInvalid bool
+	if can == coalesceAppend {
+		result := coalesceUDPPackets(pkt, &item, bufs, offset, isV6)
+		switch result {
+		case coalesceSuccess:
+			table.updateAt(item, len(items)-1)
+			return groResultCoalesced
+		case coalesceItemInvalidChecksum:
+			// If the existing item has an invalid checksum we take no action. A new
+			// item will be stored after it, and the existing item will never be
+			// revisited as part of future coalescing candidacy checks.
+		case coalescePktInvalidChecksum:
+			// We must insert a new item, but we also mark it as invalid checksum
+			// to prevent a repeat checksum validation.
+			pktChecksumKnownInvalid = true
+		}
+	}
+	// failed to coalesce with any other packets; store the item in the flow
+	table.insert(pkt, srcAddrOffset, srcAddrOffset+addrLen, iphLen, pktBufsIndex, pktChecksumKnownInvalid)
+	return groResultTableInsert
+}
+
+// applyTCPCoalesceAccounting updates bufs to account for coalescing based on the
+// metadata found in table.
+func applyTCPCoalesceAccounting(bufs [][]byte, offset int, table *tcpGROTable) error {
+	for _, items := range table.itemsByFlow {
+		for _, item := range items {
+			if item.numMerged > 0 {
+				hdr := virtioNetHdr{
+					// This turns into CHECKSUM_PARTIAL in the skb (Socket Buffer).
+					// Indicate that the packet requires checksum processing.
+					flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
+					hdrLen:     uint16(item.iphLen + item.tcphLen),
+					gsoSize:    item.gsoSize,
+					csumStart:  uint16(item.iphLen),
+					csumOffset: 16,
+				}
+				pkt := bufs[item.bufsIndex][offset:]
+				// Recalculate the total len (IPv4) or payload len (IPv6).
+				// Recalculate the (IPv4) header checksum.
+				if item.key.isV6 {
+					hdr.gsoType = unix.VIRTIO_NET_HDR_GSO_TCPV6
+					// set IPv6 header payload length
+					binary.BigEndian.PutUint16(pkt[4:], uint16(len(pkt))-uint16(item.iphLen)) // set new IPv6 header payload len
+				} else {
+					hdr.gsoType = unix.VIRTIO_NET_HDR_GSO_TCPV4
+					pkt[10], pkt[11] = 0, 0                               // set IPv4 header checksum field to 0
+					binary.BigEndian.PutUint16(pkt[2:], uint16(len(pkt))) // set new total length
+					iphChecksum := ^checksum(pkt[:item.iphLen], 0)        // compute IPv4 header checksum
+					binary.BigEndian.PutUint16(pkt[10:], iphChecksum)     // set IPv4 header checksum field
+				}
+				if err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:]); err != nil {
+					return err
+				}
+				// Calculate the pseudo header checksum and place it at the TCP
+				// checksum offset. Downstream checksum offloading will combine
+				// this with computation of the tcp header and payload checksum.
+				addrLen := 4
+				addrOffset := ipv4SrcAddrOffset
+				if item.key.isV6 {
+					addrLen = 16
+					addrOffset = ipv6SrcAddrOffset
+				}
+				srcAddrAt := offset + addrOffset
+				srcAddr := bufs[item.bufsIndex][srcAddrAt : srcAddrAt+addrLen]
+				dstAddr := bufs[item.bufsIndex][srcAddrAt+addrLen : srcAddrAt+addrLen*2]
+				// TODO: Why doesn't total length include IP header?
+				pseudoHeaderChecksum := pseudoHeaderChecksumNoFold(srcAddr, dstAddr, unix.IPPROTO_TCP, uint16(len(pkt)-int(item.iphLen)))
+				// checksum([]byte{}, pseudoHeaderChecksum) folds the initial value
+				binary.BigEndian.PutUint16(pkt[hdr.csumStart+hdr.csumOffset:], checksum([]byte{}, pseudoHeaderChecksum))
+			} else {
+				hdr := virtioNetHdr{}
+				if err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:]); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// applyUDPCoalesceAccounting updates bufs to account for coalescing based on the
+// metadata found in table.
+func applyUDPCoalesceAccounting(bufs [][]byte, offset int, table *udpGROTable) error {
+	for _, items := range table.itemsByFlow {
+		for _, item := range items {
+			if item.numMerged > 0 {
+				hdr := virtioNetHdr{
+					// This turns into CHECKSUM_PARTIAL in the skb (Socket Buffer).
+					// Indicate that the packet requires checksum processing.
+					flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
+					hdrLen:     uint16(item.iphLen + udphLen),
+					gsoSize:    item.gsoSize,
+					csumStart:  uint16(item.iphLen),
+					csumOffset: 6,
+				}
+				pkt := bufs[item.bufsIndex][offset:]
+				// Recalculate the total len (IPv4) or payload len (IPv6).
+				// Recalculate the (IPv4) header checksum.
+				hdr.gsoType = unix.VIRTIO_NET_HDR_GSO_UDP_L4
+				if item.key.isV6 {
+					// set new IPv6 header payload len
+					binary.BigEndian.PutUint16(pkt[4:], uint16(len(pkt))-uint16(item.iphLen))
+				} else {
+					pkt[10], pkt[11] = 0, 0                               // set IPv4 header checksum field to 0
+					binary.BigEndian.PutUint16(pkt[2:], uint16(len(pkt))) // set new total length
+					iphChecksum := ^checksum(pkt[:item.iphLen], 0)        // compute IPv4 header checksum
+					binary.BigEndian.PutUint16(pkt[10:], iphChecksum)     // set IPv4 header checksum field
+				}
+				// TODO: why is there space reserved for virtioNetHdr?
+				if err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:]); err != nil {
+					return err
+				}
+				// recalculate the UDP len field value
+				binary.BigEndian.PutUint16(pkt[item.iphLen+4:], uint16(len(pkt[item.iphLen:])))
+				// Calculate the pseudo header checksum and place it at the UDP
+				// checksum offset. Downstream checksum offloading will combine
+				// this with computation of the udp header and payload checksum.
+				addrLen := 4
+				addrOffset := ipv4SrcAddrOffset
+				if item.key.isV6 {
+					addrLen = 16
+					addrOffset = ipv6SrcAddrOffset
+				}
+				srcAddrAt := offset + addrOffset
+				srcAddr := bufs[item.bufsIndex][srcAddrAt : srcAddrAt+addrLen]
+				dstAddr := bufs[item.bufsIndex][srcAddrAt+addrLen : srcAddrAt+addrLen*2]
+				pseudoHeaderChecksum := pseudoHeaderChecksumNoFold(srcAddr, dstAddr, unix.IPPROTO_UDP, uint16(len(pkt)-int(item.iphLen)))
+				// checksum([]byte{}, pseudoHeaderChecksum) folds the initial value
+				binary.BigEndian.PutUint16(pkt[hdr.csumStart+hdr.csumOffset:], checksum([]byte{}, pseudoHeaderChecksum))
+			} else {
+				hdr := virtioNetHdr{}
+				if err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:]); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+type groCandidateType uint8
+
+const (
+	notGROCandidate groCandidateType = iota
+	tcp4GROCandidate
+	tcp6GROCandidate
+	udp4GROCandidate
+	udp6GROCandidate
+)
+
+func packetIsGROCandidate(b []byte, canUDPGRO bool) groCandidateType {
+	// min IP header length (20) plus UDP header length (8)
+	if len(b) < 28 {
+		return notGROCandidate
+	}
+	// check if IPv4
+	if b[0]>>4 == 4 {
+		// Check IPv4 header length. Without options it's 5 (20 bytes).
+		if b[0]&0x0F != 5 {
+			// IPv4 packets with IP options do not coalesce
+			return notGROCandidate
+		}
+		// check if payload is a TCP frame and that IP header
+		// and TCP header are of valid length (20 bytes each)
+		if b[9] == unix.IPPROTO_TCP && len(b) >= 40 {
+			return tcp4GROCandidate
+		}
+		// check if payload is a UDP frame
+		if b[9] == unix.IPPROTO_UDP && canUDPGRO {
+			return udp4GROCandidate
+		}
+		// check if IPv6
+	} else if b[0]>>4 == 6 {
+		// Check if payload is a TCP frame and that IP header
+		// and TCP header are of valid length.
+		// IP header is 40 bytes, TCP is 20 bytes.
+		if b[6] == unix.IPPROTO_TCP && len(b) >= 60 {
+			return tcp6GROCandidate
+		}
+		// Check if payload is a UDP frame and that IP header
+		// and TCP header are of valid length.
+		// IP header is 40 bytes, UDP is 8 bytes.
+		if b[6] == unix.IPPROTO_UDP && len(b) >= 48 && canUDPGRO {
+			return udp6GROCandidate
+		}
+	}
+	return notGROCandidate
+}
+
+// handleGRO evaluates bufs for GRO, and writes the indices of the resulting
+// packets into toWrite. toWrite, tcpTable, and udpTable should initially be
+// empty (but non-nil), and are passed in to save allocs as the caller may reset
+// and recycle them across vectors of packets. canUDPGRO indicates if UDP GRO is
+// supported.
+func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGROTable, canUDPGRO bool, toWrite *[]int) error {
+	for i := range bufs {
+		// TODO: why is offset the same for all bufs?
+		if offset < virtioNetHdrLen || offset > len(bufs[i])-1 {
+			return errors.New("invalid offset")
+		}
+		var result groResult
+		switch packetIsGROCandidate(bufs[i][offset:], canUDPGRO) {
+		case tcp4GROCandidate:
+			result = tcpGRO(bufs, offset, i, tcpTable, false)
+		case tcp6GROCandidate:
+			result = tcpGRO(bufs, offset, i, tcpTable, true)
+		case udp4GROCandidate:
+			result = udpGRO(bufs, offset, i, udpTable, false)
+		case udp6GROCandidate:
+			result = udpGRO(bufs, offset, i, udpTable, true)
+		}
+		switch result {
+		case groResultNoop:
+			hdr := virtioNetHdr{}
+			if err := hdr.encode(bufs[i][offset-virtioNetHdrLen:]); err != nil {
+				return err
+			}
+			fallthrough
+		case groResultTableInsert:
+			*toWrite = append(*toWrite, i)
+		}
+	}
+	errTCP := applyTCPCoalesceAccounting(bufs, offset, tcpTable)
+	errUDP := applyUDPCoalesceAccounting(bufs, offset, udpTable)
+	return errors.Join(errTCP, errUDP)
+}
+
+// gsoSplit splits packets from `in` into `outBuffs`, writing the size of each
+// element into `sizes`. It returns the number of buffers populated, and/or an
+// error.
+func gsoSplit(in []byte, hdr virtioNetHdr, outBuffs [][]byte, sizes []int, outOffset int, isV6 bool) (int, error) {
+	iphLen := int(hdr.csumStart)
+	srcAddrOffset := ipv6SrcAddrOffset
+	addrLen := 16
+	if !isV6 {
+		in[10], in[11] = 0, 0 // clear ipv4 header checksum
+		srcAddrOffset = ipv4SrcAddrOffset
+		addrLen = 4
+	}
+	// TCP or UDP header checksum offset
+	transportChecksumAt := int(hdr.csumStart + hdr.csumOffset)
+	in[transportChecksumAt], in[transportChecksumAt+1] = 0, 0 // clear TCP/UDP checksum
+	var firstSeq uint32
+	var protocol uint8
+	if hdr.gsoType == unix.VIRTIO_NET_HDR_GSO_TCPV4 || hdr.gsoType == unix.VIRTIO_NET_HDR_GSO_TCPV6 {
+		protocol = unix.IPPROTO_TCP
+		// extract sequence number from TCP header
+		firstSeq = binary.BigEndian.Uint32(in[hdr.csumStart+4:])
+	} else {
+		protocol = unix.IPPROTO_UDP
+	}
+	nextSegmentDataStart := int(hdr.hdrLen)
+	i := 0 // outBuffs index
+	for nextSegmentDataStart < len(in) {
+		if i == len(outBuffs) {
+			return i - 1, ErrTooManySegments
+		}
+		nextSegmentEnd := nextSegmentDataStart + int(hdr.gsoSize)
+		if nextSegmentEnd > len(in) {
+			nextSegmentEnd = len(in)
+		}
+		segmentDataLen := nextSegmentEnd - nextSegmentDataStart
+		totalLen := int(hdr.hdrLen) + segmentDataLen
+		sizes[i] = totalLen
+		out := outBuffs[i][outOffset:]
+		// copy IP header
+		copy(out, in[:iphLen])
+		if !isV6 {
+			// For IPv4 we are responsible for incrementing the ID field,
+			// updating the total len field, and recalculating the header
+			// checksum.
+			// If i = 0, then no need to update Identification field because it does not change.
+			if i > 0 {
+				// out is a different slice on every iteration
+				id := binary.BigEndian.Uint16(out[4:])
+				id += uint16(i)
+				binary.BigEndian.PutUint16(out[4:], id)
+			}
+			binary.BigEndian.PutUint16(out[2:], uint16(totalLen))
+			ipv4CSum := ^checksum(out[:iphLen], 0)
+			binary.BigEndian.PutUint16(out[10:], ipv4CSum)
+		} else {
+			// For IPv6 we are responsible for updating the payload length field.
+			binary.BigEndian.PutUint16(out[4:], uint16(totalLen-iphLen))
+		}
+		// copy transport header ([iphLen:iphLen+tcp/udphLen])
+		copy(out[hdr.csumStart:hdr.hdrLen], in[hdr.csumStart:hdr.hdrLen])
+		if protocol == unix.IPPROTO_TCP {
+			// set TCP seq and adjust TCP flags
+			seq := firstSeq + uint32(hdr.gsoSize*uint16(i))
+			binary.BigEndian.PutUint32(out[hdr.csumStart+4:], seq)
+			if nextSegmentEnd != len(in) {
+				// FIN and PSH should only be set on last segment
+				clearFlags := tcpFlagFIN | tcpFlagPSH
+				// "&^" is the "AND NOT" or "bit clear" operator.
+				// It clears bits where the right operand has 1s.
+				// x &^= y is equivalent to x = x & (^y)
+				// Example:
+				// x = 0b11111111
+				// y = 0b00010001  // clear bits 4 and 0
+				// x &^= y         // x = 0b11101110
+				out[hdr.csumStart+tcpFlagsOffset] &^= clearFlags
+			}
+		} else {
+			// set UDP header len
+			binary.BigEndian.PutUint16(out[hdr.csumStart+4:], uint16(segmentDataLen)+(hdr.hdrLen-hdr.csumStart))
+		}
+		// payload
+		copy(out[hdr.hdrLen:], in[nextSegmentDataStart:nextSegmentEnd])
+		// transport checksum
+		transportHeaderLen := int(hdr.hdrLen - hdr.csumStart)
+		lenForPseudo := uint16(transportHeaderLen + segmentDataLen)
+		transportChecksumNoFold := pseudoHeaderChecksumNoFold(in[srcAddrOffset:srcAddrOffset+addrLen], in[srcAddrOffset+addrLen:srcAddrOffset+addrLen*2], protocol, lenForPseudo)
+		transportChecksum := ^checksum(out[hdr.csumStart:totalLen], transportChecksumNoFold)
+		binary.BigEndian.PutUint16(out[hdr.csumStart+hdr.csumOffset:], transportChecksum)
+		nextSegmentDataStart += int(hdr.gsoSize)
+		i++
+	}
+	return i, nil
+}
+
+func gsoNoneChecksum(in []byte, checksumStart, checksumOffset uint16) error {
+	checksumAt := checksumStart + checksumOffset
+	// The initial value at the checksum offset should be summed with the
+	// checksum we compute. This is typically the pseudo-header checksum.
+	initial := binary.BigEndian.Uint16(in[checksumAt:])
+	in[checksumAt], in[checksumAt+1] = 0, 0
+	binary.BigEndian.PutUint16(in[checksumAt:], ^checksum(in[checksumStart:], uint64(initial)))
+	return nil
 }
