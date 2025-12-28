@@ -80,7 +80,7 @@ Field Descriptions (IPv6):
 UDP (User Datagram Protocol)
 
  0               1               2               3
- 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 
+ 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |          Source Port          |       Destination Port        |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -89,7 +89,7 @@ UDP (User Datagram Protocol)
 |                             Data                              |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
-Key UDP Header Fields:
+UDP Header Fields:
     Source Port (16 bits): Optional, 0 if unused
     Destination Port (16 bits): Receiver's port
     Length (16 bits): UDP header + data length in bytes
@@ -120,7 +120,7 @@ TCP (Transmission Control Protocol)
 |                             Data                              |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
-Key TCP Header Fields:
+TCP Header Fields:
     Source Port (16 bits): Sender's port
     Destination Port (16 bits): Receiver's port
     Sequence Number (32 bits): Byte position in data stream

@@ -9,27 +9,24 @@ import (
 )
 
 type RWCancel struct {
-	// file descriptor
-	fd int
-	// closing reader
-	r *os.File
-	// closing writer
-	w *os.File
+	fd int      // file descriptor
+	r  *os.File // closing reader
+	w  *os.File // closing writer
 }
 
 func New(fd int) (*RWCancel, error) {
 	// Sets the non-blocking flag on a file descriptor.
 	//
 	// Blocking I/O (Default):
-    // read() will WAIT until data is available
-    // data := make([]byte, 1024)
-    // n, err := syscall.Read(fd, data)  // hangs here if no data
+	// read() will WAIT until data is available
+	// data := make([]byte, 1024)
+	// n, err := syscall.Read(fd, data)  // hangs here if no data
 	//
 	// Non-blocking I/O
-    // read() returns IMMEDIATELY, even if no data
+	// read() returns IMMEDIATELY, even if no data
 	// n, err := syscall.Read(fd, data)
 	// if err != nil && err == syscall.EAGAIN {
-    //     No data available yet, try again later
+	//     No data available yet, try again later
 	// }
 	err := unix.SetNonblock(fd, true)
 	if err != nil {
@@ -44,6 +41,7 @@ func New(fd int) (*RWCancel, error) {
 	return rw, nil
 }
 
+// RetryAfterError checks if error is retryable
 func RetryAfterError(err error) bool {
 	// EAGAIN: resource temporarily unavailable
 	// EINTR: interrupted system call
@@ -61,17 +59,17 @@ func (rw *RWCancel) ReadyRead() bool {
 	// POLLIN: data available to read
 	pollFds := []unix.PollFd{
 		{
-			Fd: int32(rw.fd),
+			Fd:     int32(rw.fd),
 			Events: unix.POLLIN,
 		},
 		{
-			Fd: closeFd,
+			Fd:     closeFd,
 			Events: unix.POLLIN,
 		},
 	}
 	var err error
 	for {
-		_, err = unix.Poll(pollFds, -1)  // -1 = wait forever
+		_, err = unix.Poll(pollFds, -1) // -1 = wait forever
 		if err == nil || !RetryAfterError(err) {
 			break
 		}
@@ -79,6 +77,10 @@ func (rw *RWCancel) ReadyRead() bool {
 	if err != nil {
 		return false
 	}
+	// Revents is returned events.
+	// if pfd.Revents & POLLIN != 0 { // "&" is used if several events are monitored
+	//     socket has data to read
+	// }
 	if pollFds[1].Revents != 0 {
 		return false
 	}
@@ -90,11 +92,11 @@ func (rw *RWCancel) ReadyWrite() bool {
 	// POLLOUT: ready for writing
 	pollFds := []unix.PollFd{
 		{
-			Fd: int32(rw.fd),
+			Fd:     int32(rw.fd),
 			Events: unix.POLLOUT,
 		},
 		{
-			Fd: closeFd,
+			Fd:     closeFd,
 			Events: unix.POLLIN,
 		},
 	}
