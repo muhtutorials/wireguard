@@ -124,11 +124,11 @@ type tcpGROTable struct {
 
 func newTCPGROTable() *tcpGROTable {
 	t := &tcpGROTable{
-		itemsByFlow: make(map[tcpFlowKey][]tcpGROItem, conn.IdealBatchSize),
-		itemsPool:   make([][]tcpGROItem, conn.IdealBatchSize),
+		itemsByFlow: make(map[tcpFlowKey][]tcpGROItem, conn.BatchSize),
+		itemsPool:   make([][]tcpGROItem, conn.BatchSize),
 	}
 	for i := range t.itemsPool {
-		t.itemsPool[i] = make([]tcpGROItem, 0, conn.IdealBatchSize)
+		t.itemsPool[i] = make([]tcpGROItem, 0, conn.BatchSize)
 	}
 	return t
 }
@@ -254,11 +254,11 @@ type udpGROTable struct {
 
 func newUDPGROTable() *udpGROTable {
 	u := &udpGROTable{
-		itemsByFlow: make(map[udpFlowKey][]udpGROItem, conn.IdealBatchSize),
-		itemsPool:   make([][]udpGROItem, conn.IdealBatchSize),
+		itemsByFlow: make(map[udpFlowKey][]udpGROItem, conn.BatchSize),
+		itemsPool:   make([][]udpGROItem, conn.BatchSize),
 	}
 	for i := range u.itemsPool {
-		u.itemsPool[i] = make([]udpGROItem, 0, conn.IdealBatchSize)
+		u.itemsPool[i] = make([]udpGROItem, 0, conn.BatchSize)
 	}
 	return u
 }

@@ -1,0 +1,458 @@
+IPPROTO_UDP
+Description: specifies UDP (User Datagram Protocol) inside IPv4 header (protocol field).
+
+IPPROTO_TCP
+Description: specifies TCP (Transmission Control Protocol) inside IPv4 header (protocol field).
+
+VIRTIO_NET_HDR_F_NEEDS_CSUM
+Description: flag used in virtio networking to indicate that packet checksum calculation is needed.
+Usage:
+hdr := virtioNetHdr{
+   	flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
+   	gsoType:    unix.VIRTIO_NET_HDR_GSO_TCPV4,
+   	hdrLen:     uint16(item.iphLen + item.tcphLen),
+   	gsoSize:    item.gsoSize,
+   	csumStart:  uint16(item.iphLen),
+   	csumOffset: 16,
+}
+if err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:]); err != nil {
+   	return err
+}
+
+VIRTIO_NET_HDR_GSO_TCPV4
+Description: flag used in virtio networking for TCP/IPv4 segmentation offloading (GSO).
+It allows large TCP packets to be sent as a single unit and segmented by the hypervisor or hardware.
+Usage:
+hdr := virtioNetHdr{
+   	flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
+   	gsoType:    unix.VIRTIO_NET_HDR_GSO_TCPV4,
+   	hdrLen:     uint16(item.iphLen + item.tcphLen),
+   	gsoSize:    item.gsoSize,
+   	csumStart:  uint16(item.iphLen),
+   	csumOffset: 16,
+}
+if err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:]); err != nil {
+   	return err
+}
+
+VIRTIO_NET_HDR_GSO_TCPV6
+Description: flag used in virtio networking for TCP/IPv6 segmentation offloading (GSO).
+It allows large TCP packets to be sent as a single unit and segmented by the hypervisor or hardware.
+Usage:
+hdr := virtioNetHdr{
+   	flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
+   	gsoType:    unix.VIRTIO_NET_HDR_GSO_TCPV6,
+   	hdrLen:     uint16(item.iphLen + item.tcphLen),
+   	gsoSize:    item.gsoSize,
+   	csumStart:  uint16(item.iphLen),
+   	csumOffset: 16,
+}
+if err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:]); err != nil {
+   	return err
+}
+
+VIRTIO_NET_HDR_GSO_UDP_L4
+Description: flag used in virtio networking for UDP segmentation offloading at the transport layer (Layer 4).
+Usage:
+hdr := virtioNetHdr{
+   	flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
+   	gsoType:    unix.VIRTIO_NET_HDR_GSO_UDP_L4,
+   	hdrLen:     uint16(item.iphLen + item.tcphLen),
+   	gsoSize:    item.gsoSize,
+   	csumStart:  uint16(item.iphLen),
+   	csumOffset: 16,
+}
+if err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:]); err != nil {
+   	return err
+}
+
+IFNAMSIZ
+Description: maximum interface name size (15 characters + 1 null terminator, 16 bytes total).
+
+Socket(domain int, typ int, proto int) (fd int, err error)
+Description: system call for creating network sockets.
+Usage:
+sock, err := unix.Socket(
+   	unix.AF_NETLINK,
+   	unix.SOCK_RAW|unix.SOCK_CLOEXEC,
+   	unix.NETLINK_ROUTE,
+)
+
+AF_NETLINK
+Description: kernel-user communication protocol.
+Usage:
+sock, err := unix.Socket(
+   	unix.AF_NETLINK,
+   	unix.SOCK_RAW|unix.SOCK_CLOEXEC,
+   	unix.NETLINK_ROUTE,
+)
+
+SOCK_RAW
+Description: socket type in Unix/Linux systems that provides direct access to network packets
+at the transport layer (TCP/UDP) or network layer (IP/ICMP)
+Usage:
+sock, err := unix.Socket(
+   	unix.AF_NETLINK,
+   	unix.SOCK_RAW|unix.SOCK_CLOEXEC,
+   	unix.NETLINK_ROUTE,
+)
+
+SOCK_CLOEXEC
+Description: socket creation flag that automatically sets the FD_CLOEXEC (close-on-exec)
+flag on the newly created file descriptor. Flag ensures that the socket (or any file descriptor)
+is automatically closed when a process calls exec() to execute a new program.
+Usage:
+sock, err := unix.Socket(
+   	unix.AF_NETLINK,
+   	unix.SOCK_RAW|unix.SOCK_CLOEXEC,
+   	unix.NETLINK_ROUTE,
+)
+
+NETLINK_ROUTE
+Description: subscribe to routing/network events.
+Usage:
+sock, err := unix.Socket(
+   	unix.AF_NETLINK,
+   	unix.SOCK_RAW|unix.SOCK_CLOEXEC,
+   	unix.NETLINK_ROUTE,
+)
+
+SockaddrNetlink
+Description: implements the Sockaddr interface for AF_NETLINK type sockets.
+Usage:
+SockaddrNetlink{
+	Family: unix.AF_NETLINK,
+	Groups: unix.RTMGRP_LINK | unix.RTMGRP_IPV4_IFADDR | unix.RTMGRP_IPV6_IFADDR,
+}
+
+RTMGRP_LINK
+Description: allows applications to subscribe to and receive asynchronous notifications
+when network interfaces change state (up/down), are added, removed, or modified.
+Usage:
+SockaddrNetlink{
+	Family: unix.AF_NETLINK,
+	Groups: unix.RTMGRP_LINK | unix.RTMGRP_IPV4_IFADDR | unix.RTMGRP_IPV6_IFADDR,
+}
+
+RTMGRP_IPV4_IFADDR
+Description: allows applications to receive real-time notifications when IPv4
+addresses are configured or removed from network interfaces.
+Usage:
+SockaddrNetlink{
+	Family: unix.AF_NETLINK,
+	Groups: unix.RTMGRP_LINK | unix.RTMGRP_IPV4_IFADDR | unix.RTMGRP_IPV6_IFADDR,
+}
+
+RTMGRP_IPV6_IFADDR
+Description: allows applications to receive real-time notifications when IPv6 addresses are configured
+or removed from network interfaces, including link-local, global, and unique local addresses.
+Usage:
+SockaddrNetlink{
+	Family: unix.AF_NETLINK,
+	Groups: unix.RTMGRP_LINK | unix.RTMGRP_IPV4_IFADDR | unix.RTMGRP_IPV6_IFADDR,
+}
+
+Bind(fd int, sa unix.Sockaddr) (err error)
+
+Recvmsg(fd int, p []byte, oob []byte, flags int) (n int, oobn int, recvflags int, from unix.Sockaddr, err error)
+Description: receives a message from a socket using the recvmsg system call.
+The received non-control data will be written to p, and any “out of band”
+control data will be written to oob. The flags are passed to recvmsg.
+
+SizeofNlMsghdr
+Description: size of netlink message header.
+
+NlMsghdr
+Description: netlink message header.
+Usage:
+type NlMsghdr struct {
+	Len   uint32
+	Type  uint16
+	Flags uint16
+	Seq   uint32
+	Pid   uint32
+}
+
+NLMSG_DONE
+Description: netlink control message type that signals the end of a multipart message sequence.
+Usage: NlMsghdr.Type
+
+RTM_NEWLINK
+Description: netlink message type that notifies about new network interfaces
+being created or existing interfaces being modified.
+Usage: NlMsghdr.Type
+
+IfInfomsg
+Description: interface information message
+Usage:
+type IfInfomsg struct {
+	Family uint8
+	_      uint8
+	Type   uint16
+	Index  int32
+	Flags  uint32
+	Change uint32
+}
+
+IFF_RUNNING
+Description: indicates whether a network interface has allocated its resources
+and is ready to transmit and receive packets.
+Usage: IfInfomsg.Flags
+
+EINVAL
+Description: invalid argument.
+Usage:
+_, err = unix.Write(int(fd), nil)
+switch err {
+	case unix.EINVAL:
+
+EIO
+Description: I/O error.
+Usage:
+_, err = unix.Write(int(fd), nil)
+switch err {
+	case unix.EIO:
+
+AF_INET
+Description: address family - internet. Uses IPv4 addresses for networking.
+Usage:
+fd, err := unix.Socket(
+	unix.AF_INET,
+	unix.SOCK_DGRAM|unix.SOCK_CLOEXEC,
+	0,
+)
+
+SOCK_DGRAM
+Description: connectionless, unreliable datagram socket (UDP).
+Usage:
+fd, err := unix.Socket(
+	unix.AF_INET,
+	unix.SOCK_DGRAM|unix.SOCK_CLOEXEC,
+	0,
+)
+
+SYS_IOCTL
+Description: tells the kernel to perform an "input/output control" operation.
+Usage:
+_, _, errno := unix.Syscall(
+	unix.SYS_IOCTL,
+	uintptr(fd),
+	uintptr(unix.SIOCGIFINDEX),
+	uintptr(unsafe.Pointer(&ifReq[0])),
+)
+
+SIOCGIFINDEX
+Description: socket I/O control get interface index.
+Usage:
+_, _, errno := unix.Syscall(
+	unix.SYS_IOCTL,
+	uintptr(fd),
+	uintptr(unix.SIOCGIFINDEX),
+	uintptr(unsafe.Pointer(&ifReq[0])),
+)
+
+SIOCSIFMTU
+Description: socket I/O control set interface MTU.
+_, _, errno := unix.Syscall(
+	unix.SYS_IOCTL,
+	uintptr(fd),
+	uintptr(unix.SIOCSIFMTU),
+	uintptr(unsafe.Pointer(&ifReq[0])),
+)
+
+SIOCGIFMTU
+Description: socket I/O control get interface MTU.
+Usage:
+_, _, errno := unix.Syscall(
+	unix.SYS_IOCTL,
+	uintptr(fd),
+	uintptr(unix.SIOCGIFMTU),
+	uintptr(unsafe.Pointer(&ifReq[0])),
+)
+
+TUNGETIFF
+Description: get TUN/TAP configuration.
+Usage:
+_, _, errno = unix.Syscall(
+	unix.SYS_IOCTL,
+	fd,
+	uintptr(unix.TUNGETIFF),
+	uintptr(unsafe.Pointer(&ifReq[0])),
+)
+
+ByteSliceToString(s []byte) string
+Description: discards bytes from slice starting from C-string terminator (0 byte)
+
+VIRTIO_NET_HDR_GSO_NONE
+Description: no generic segmentation offloading (GSO) is being used for a network packet.
+As slice goes in, so it goes out!
+Usage: virtioNetHdr.gsoType
+
+TUN_F_CSUM
+Description: checksum offloading. Offloads IP/TCP/UDP checksum calculation to hardware.
+Without this kernel calculates checksums in software. With this NIC hardware calculates checksums,
+and thus reduces CPU usage for checksum computation.
+Usage:
+tunTCPOffloads = unix.TUN_F_CSUM | unix.TUN_F_TSO4 | unix.TUN_F_TSO6
+unix.IoctlSetInt(int(fd), unix.TUNSETOFFLOAD, tunTCPOffloads)
+
+TUN_F_TSO4
+Description: TCP segmentation offloading for IPv4.
+Usage:
+tunTCPOffloads = unix.TUN_F_CSUM | unix.TUN_F_TSO4 | unix.TUN_F_TSO6
+unix.IoctlSetInt(int(fd), unix.TUNSETOFFLOAD, tunTCPOffloads)
+
+TUN_F_TSO6
+Description: TCP segmentation offloading for IPv6.
+Usage:
+tunTCPOffloads = unix.TUN_F_CSUM | unix.TUN_F_TSO4 | unix.TUN_F_TSO6
+unix.IoctlSetInt(int(fd), unix.TUNSETOFFLOAD, tunTCPOffloads)
+
+TUN_F_USO4
+Description: UDP segmentation offloading for IPv4.
+Usage:
+tunUDPOffloads = unix.TUN_F_USO4 | unix.TUN_F_USO6
+unix.IoctlSetInt(int(fd), unix.TUNSETOFFLOAD, tunTCPOffloads|tunUDPOffloads)
+
+TUN_F_USO6
+Description: UDP segmentation offloading for IPv6.
+Usage:
+tunUDPOffloads = unix.TUN_F_USO4 | unix.TUN_F_USO6
+unix.IoctlSetInt(int(fd), unix.TUNSETOFFLOAD, tunTCPOffloads|tunUDPOffloads)
+
+NewIfreq(name string) (*unix.Ifreq, error)
+Description: NewIfreq creates an Ifreq with the input network interface name after
+validating the name does not exceed IFNAMSIZ-1 (trailing NULL required) bytes.
+
+IoctlIfreq(fd int, req uint, value *unix.Ifreq) error
+Description: performs an ioctl using an Ifreq structure for input and/or output.
+Usage: IoctlIfreq(int(fd), unix.TUNGETIFF, ifReq)
+
+TUNGETIFF
+Description: retrieve the configuration and flags of a TUN/TAP.
+Usage: unix.IoctlIfreq(int(fd), unix.TUNGETIFF, ifReq)
+
+IFF_VNET_HDR
+Description: indicates the TUN/TAP device will use a virtio-net header in front of each packet.
+This enables communication of offloading metadata between kernel and userspace.
+Allows userspace programs to handle hardware offloading.
+Usage:
+resp := ifReq.Uint16()
+resp&unix.IFF_VNET_HDR != 0
+
+IoctlSetInt(fd int, req uint, value int) error
+Description: performs an ioctl operation which sets an integer value on fd, using the specified request number.
+Usage: unix.IoctlSetInt(int(fd), unix.TUNSETOFFLOAD, tunTCPOffloads)
+
+TUNSETOFFLOAD
+Description: ioctl command used to enable or disable hardware offloading features on TUN/TAP devices.
+
+IFF_TUN:
+Description: creates a layer 3 TUN device (IP packets).
+Usage: ifReq.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
+
+IFF_NO_PI:
+Description: no packet information header. Without this flag, TUN/TAP prepends
+a 4-byte header to each packet: [flags (2 bytes)][proto (2 bytes)][packet data]
+Usage: ifReq.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
+
+SetNonblock
+Description: sets a file descriptor to non-blocking mode.
+
+Cmsghdr
+Description: used in socket programming to send and receive ancillary data (also called control data)
+alongside regular data through sockets.
+Usage:
+type Cmsghdr struct {
+    Len   uint64 // total length of the control message (including header and data)
+    Level int32  // originating protocol level (e.g., SOL_SOCKET, SOL_UDP)
+    Type  int32  // protocol-specific type (e.g., UDP_SEGMENT, UDP_GRO)
+}
+
+SizeofCmsghdr
+Description: size of Cmsghdr.
+
+ParseOneSocketControlMessage(b []byte) (hdr unix.Cmsghdr, data []byte, remainder []byte, err error)
+Description: parses a single socket control message from b, returning the message header, message data (a slice of b), and the remainder of b after that single message. When there are no remaining messages, len(remainder) == 0.
+
+SOL_UDP
+Description: socket option level for UDP.
+Usage: hdr.Level
+
+UDP_GRO
+Description: generic receive offload (GRO). NIC combines multiple incoming packets into one large packet,
+Kernel delivers them as a single datagram to userspace. Opposite of GSO (which splits on transmit).
+Usage: hdr.Type
+
+UDP_SEGMENT
+Description: socket option that enables UDP segmentation offload (USO).
+It allows the kernel to segment a large UDP datagram into multiple MTU-sized
+packets in the kernel space, improving performance for large UDP transmissions.
+
+CmsgLen
+Description: calculates the exact length of a control message (ancillary data) including its header.
+
+CmsgSpace
+Description: calculates the buffer space needed for control messages (ancillary data) including proper alignment for the next control message.
+
+GetsockoptInt
+Description: retrieves integer socket options.
+Usage: _, errSyscall := unix.GetsockoptInt(int(fd), unix.IPPROTO_UDP, unix.UDP_SEGMENT)
+
+SizeofInet4Pktinfo
+Description: constant that represents the size (in bytes) of the Inet4Pktinfo.
+
+SizeofInet6Pktinfo
+Description: constant that represents the size (in bytes) of the Inet6Pktinfo.
+
+Inet4Pktinfo
+Description: provide detailed information about IPv4 packets.
+It's part of the Advanced Socket API and is typically used with the IP_PKTINFO socket option.
+    type Inet4Pktinfo struct {
+        Ifindex  int32
+        Spec_dst [4]byte
+        Addr     [4]byte
+    }
+    Ifindex:
+        Interface index where the packet was received or should be sent from.
+        You can map this to interface name using if_nametoindex()/if_indextoname().
+    Spec_dst:
+        Local address that the packet was sent to (important for multihomed hosts).
+        For received packets: the local IP address that the client sent to.
+        For sending packets: the source IP address to use.
+    Addr:
+        Destination address from the IP header.
+        For received packets: the destination IP in the packet header.
+        For sending packets: typically not used.
+
+Inet6Pktinfo
+Description: providing detailed information about IPv6 packets.
+It's used with the IPV6_PKTINFO socket option and contains information specific to IPv6 networking.
+    type Inet6Pktinfo struct {
+        Addr    [16]byte
+        Ifindex uint32
+    }
+    Addr:
+        IPv6 address (128 bits / 16 bytes).
+        For received packets: The destination IPv6 address from the packet.
+        For sent packets: The source IPv6 address to use (optional).
+    Ifindex:
+        Interface index (32-bit unsigned).
+        For received packets: Interface where packet was received.
+        For sent packets: Interface to send from (0 means use default).
+
+IPPROTO_IP
+Description: represents the Internet Protocol level in the socket options.
+Usage: hdr.Level == unix.IPPROTO_IP
+
+IP_PKTINFO
+Description: socket option that enables receiving and sending detailed packet information for IPv4 sockets.
+Usage: hdr.Type == unix.IP_PKTINFO
+
+IPPROTO_IPV6
+Description: protocol level constant for IPv6 socket options.
+Usage: hdr.Level == unix.IPPROTO_IPV6
+
+IPV6_PKTINFO
+Description: socket option that enables receiving and sending detailed packet information for IPv6 sockets.
+Usage: hdr.Type == unix.IPV6_PKTINFO

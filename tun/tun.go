@@ -55,17 +55,17 @@ type Device interface {
 
 const (
 	cloneDevicePath = "/dev/net/tun"
-	// unix.IFNAMSIZ is maximum interface name size:
+	// IFNAMSIZ is maximum interface name size:
 	// 15 characters + 1 null terminator (16 bytes total).
 	// TODO: why do we add 64?
 	ifReqSize = unix.IFNAMSIZ + 64
 )
 
 type Tun struct {
-	file                    *os.File
-	index                   int32      // if index
-	errors                  chan error // async error handling
-	events                  chan Event // device related events
+	file   *os.File
+	index  int32      // if index
+	errors chan error // async error handling
+	events chan Event // device related events
 	// netlink is a communication mechanism between
 	// userspace processes and the Linux kernel
 	netlinkSock             int
@@ -94,9 +94,9 @@ type Tun struct {
 // createNetlinkSocket creates a NETLINK socket that monitors network interface changes
 func createNetlinkSocket() (int, error) {
 	sock, err := unix.Socket(
-		unix.AF_NETLINK, 				 // kernel-user communication protocol
-	 	unix.SOCK_RAW|unix.SOCK_CLOEXEC, // raw access + auto-close on exec
-		unix.NETLINK_ROUTE               // subscribe to routing/network events
+		unix.AF_NETLINK,                 // kernel-user communication protocol
+		unix.SOCK_RAW|unix.SOCK_CLOEXEC, // raw access + auto-close on exec
+		unix.NETLINK_ROUTE,              // subscribe to routing/network events
 	)
 	if err != nil {
 		return -1, err
@@ -561,7 +561,6 @@ func (tun *Tun) Events() <-chan Event {
 	return tun.events
 }
 
-
 func (tun *Tun) BatchSize() int {
 	return tun.batchSize
 }
@@ -632,7 +631,7 @@ func (tun *Tun) initFromFlags(name string) error {
 				return
 			}
 			tun.vnetHdr = true
-			tun.batchSize = conn.IdealBatchSize
+			tun.batchSize = conn.BatchSize
 			// tunUDPOffloads were added in Linux v6.2. We do not return an
 			// error if they are unsupported at runtime.
 			tun.udpGSO = unix.IoctlSetInt(int(fd), unix.TUNSETOFFLOAD, tunTCPOffloads|tunUDPOffloads) == nil
@@ -691,7 +690,7 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 		statusListenersShutdown: make(chan struct{}),
 		tcpGROTable:             newTCPGROTable(),
 		udpGROTable:             newUDPGROTable(),
-		toWrite:                 make([]int, 0, conn.IdealBatchSize),
+		toWrite:                 make([]int, 0, conn.BatchSize),
 	}
 	name, err := tun.Name()
 	if err != nil {
@@ -738,7 +737,7 @@ func CreateUnmonitoredTUNFromFD(fd int) (Device, string, error) {
 		errors:      make(chan error, 5),
 		tcpGROTable: newTCPGROTable(),
 		udpGROTable: newUDPGROTable(),
-		toWrite:     make([]int, 0, conn.IdealBatchSize),
+		toWrite:     make([]int, 0, conn.BatchSize),
 	}
 	name, err := tun.Name()
 	if err != nil {
