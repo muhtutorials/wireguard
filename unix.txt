@@ -456,3 +456,67 @@ Usage: hdr.Level == unix.IPPROTO_IPV6
 IPV6_PKTINFO
 Description: socket option that enables receiving and sending detailed packet information for IPv6 sockets.
 Usage: hdr.Type == unix.IPV6_PKTINFO
+
+EAFNOSUPPORT
+Description: error address family not supported.
+Usage:
+if conn == nil {
+	return syscall.EAFNOSUPPORT
+}
+
+Utsname
+Description: structure for system identification in Unix/Linux systems.
+It contains information about the operating system, version, and hardware.
+type Utsname struct {
+    Sysname    [65]byte // Operating system name
+    Nodename   [65]byte // Network node hostname
+    Release    [65]byte // OS release version
+    Version    [65]byte // OS version details
+    Machine    [65]byte // Hardware identifier
+    Domainname [65]byte // NIS domain name
+}
+
+Uname
+Description: calls the Unix uname() system call to populate a Utsname struct with system information.
+
+SetsockoptInt
+Description: socket configuration function that sets integer options on sockets.
+It's a direct interface to the setsockopt() system call.
+Parameters:
+    fd - socket file descriptor
+    level - protocol level (SOL_SOCKET, IPPROTO_TCP, etc.)
+    opt - option name (SO_REUSEADDR, TCP_NODELAY, etc.)
+    value - integer value to set
+
+SOL_SOCKET
+Description: indicates that a socket option applies at the socket API level.
+
+SO_RCVBUF
+Description: socket option that controls the size of the receive buffer for a socket.
+It determines how much data can be queued for receiving before the OS starts dropping packets.
+
+SO_SNDBUF
+Description: socket option that controls the size of the send buffer for a socket.
+It determines how much data can be queued for sending before the application blocks or gets an error.
+
+SO_RCVBUFFORCE
+Description: socket option used to override system-wide limits on the receive buffer size for a socket.
+Sets the socket's receive buffer size even if it exceeds the maximum limit defined in '/proc/sys/net/core/rmem_max'.
+Requires CAP_NET_ADMIN capability (typically root privileges).
+
+SO_SNDBUFFORCE
+Description: send buffer counterpart to SO_RCVBUFFORCE.
+
+IPV6_RECVPKTINFO
+Description: socket option for IPv6 sockets that enables reception of destination
+address and interface information with received packets.
+When enabled, this option causes the kernel to include
+ancillary data containing struct in6_pktinfo with each received packet:
+    struct in6_pktinfo {
+        struct in6_addr ipi6_addr;    /* destination IPv6 address */
+        unsigned int    ipi6_ifindex; /* arriving interface index */
+    };
+
+IPV6_V6ONLY
+Description: socket option that controls whether an IPv6 socket
+can also handle IPv4 connections via IPv4-mapped IPv6 addresses.

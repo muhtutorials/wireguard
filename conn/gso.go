@@ -17,6 +17,10 @@ const (
 	sizeOfGSOData = 2
 )
 
+// gsoControlSize returns the recommended buffer size for pooling UDP
+// offloading control data.
+var gsoControlSize = unix.CmsgSpace(sizeOfGSOData)
+
 // type Cmsghdr struct {
 //     Len   uint64 // total length of the control message (including header and data)
 //     Level int32  // originating protocol level (e.g., SOL_SOCKET, SOL_UDP)
@@ -70,7 +74,3 @@ func setGSOSize(control *[]byte, gsoSize uint16) {
 	copy((gsoControl)[unix.CmsgLen(0):], unsafe.Slice((*byte)(unsafe.Pointer(&gsoSize)), sizeOfGSOData))
 	*control = (*control)[:length+space]
 }
-
-// gsoControlSize returns the recommended buffer size for pooling UDP
-// offloading control data.
-var gsoControlSize = unix.CmsgSpace(sizeOfGSOData)

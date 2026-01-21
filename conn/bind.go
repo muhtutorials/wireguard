@@ -3,9 +3,10 @@ package conn
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
-	"runtime"
+	"os"
 	"strconv"
 	"sync"
 	"syscall"
@@ -16,8 +17,8 @@ import (
 )
 
 const (
-	// Exceeding these values results in EMSGSIZE. They account for layer3 and
-	// layer4 headers. IPv6 does not need to account for itself as the payload
+	// Exceeding these values results in EMSGSIZE. They account for layer 3 and
+	// layer 4 headers. IPv6 does not need to account for itself as the payload
 	// length field is self excluding.
 	// IPv4 total length field includes header and payload.
 	// 20 is IPv4 header size, 8 is UDP header size.
@@ -46,11 +47,7 @@ var (
 	_ ipv6.Message = ipv4.Message{}
 )
 
-// TODO: Remove usage of ipv{4,6}.PacketConn when net.UDPConn has comparable
-// methods for sending and receiving multiple datagrams per-syscall. See the
-// proposal in https://github.com/golang/go/issues/45886#issuecomment-1218301564.
 type NetBind struct {
-	mu            sync.Mutex // protects all fields except as specified
 	ipv4          *net.UDPConn
 	ipv6          *net.UDPConn
 	ipv4PC        *ipv4.PacketConn
@@ -62,8 +59,15 @@ type NetBind struct {
 	// these two fields are not guarded by mu
 	udpAddrPool sync.Pool
 	msgsPool    sync.Pool
-	blackhole4  bool
-	blackhole6  bool
+	// blackhole means:
+	//	Packets are silently discarded.
+	//	No error is returned to the sender.
+	//	Traffic disappears as if it never existed.
+	//	Useful for security, testing, or selective filtering.
+	blackhole4 bool
+	blackhole6 bool
+	// protects all fields except as specified
+	mu sync.Mutex
 }
 
 func New() Bind {
@@ -79,7 +83,7 @@ func New() Bind {
 			New: func() any {
 				// ipv6.Message and ipv4.Message are interchangeable as they are
 				// both aliases for x/net/internal/socket.Message.
-				msgs := make([]ipv6.Message, IdealBatchSize)
+				msgs := make([]ipv6.Message, BatchSize)
 				for i := range msgs {
 					msgs[i].Buffers = make(net.Buffers, 1)
 					msgs[i].OOB = make([]byte, 0, stickyControlSize+gsoControlSize)
@@ -98,20 +102,10 @@ type NetEndpoint struct {
 	// messages, see unix.PKTINFO for an example.
 	// When a server has multiple IP addresses or multiple network interfaces,
 	// it needs to know:
-	// 	which local IP received an incoming packet
-	// 	which interface received it
-	// 	which source IP to use when replying
+	// 	Which local IP received an incoming packet.
+	// 	Which interface received it.
+	// 	Which source IP to use when replying.
 	src []byte
-}
-
-func (*NetBind) ParseEndpoint(s string) (Endpoint, error) {
-	ap, err := netip.ParseAddrPort(s)
-	if err != nil {
-		return nil, err
-	}
-	return &NetEndpoint{
-		AddrPort: ap,
-	}, nil
 }
 
 func (e *NetEndpoint) ClearSrc() {
@@ -151,7 +145,6 @@ func listenNet(network string, port int) (*net.UDPConn, int, error) {
 	return conn.(*net.UDPConn), udpAddr.Port, nil
 }
 
-// TODO: learn it
 func (b *NetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -187,20 +180,16 @@ func (b *NetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 		var fns []ReceiveFunc
 		if v4conn != nil {
 			b.ipv4TxOffload, b.ipv4RxOffload = supportsUDPOffload(v4conn)
-			if runtime.GOOS == "linux" || runtime.GOOS == "android" {
-				v4pc = ipv4.NewPacketConn(v4conn)
-				b.ipv4PC = v4pc
-			}
-			fns = append(fns, b.makeReceiveIPv4(v4pc, v4conn, b.ipv4RxOffload))
+			v4pc = ipv4.NewPacketConn(v4conn)
+			b.ipv4PC = v4pc
+			fns = append(fns, b.makeReceiveIPv4(v4pc, b.ipv4RxOffload))
 			b.ipv4 = v4conn
 		}
 		if v6conn != nil {
 			b.ipv6TxOffload, b.ipv6RxOffload = supportsUDPOffload(v6conn)
-			if runtime.GOOS == "linux" || runtime.GOOS == "android" {
-				v6pc = ipv6.NewPacketConn(v6conn)
-				b.ipv6PC = v6pc
-			}
-			fns = append(fns, b.makeReceiveIPv6(v6pc, v6conn, b.ipv6RxOffload))
+			v6pc = ipv6.NewPacketConn(v6conn)
+			b.ipv6PC = v6pc
+			fns = append(fns, b.makeReceiveIPv6(v6pc, b.ipv6RxOffload))
 			b.ipv6 = v6conn
 		}
 		if len(fns) == 0 {
@@ -236,46 +225,152 @@ func (b *NetBind) Close() error {
 	return err2
 }
 
+var fwmarkIoctl int = 36
+
+func (b *NetBind) SetMark(mark uint32) error {
+	var operr error
+	if b.ipv4 != nil {
+		fd, err := b.ipv4.SyscallConn()
+		if err != nil {
+			return err
+		}
+		err = fd.Control(func(fd uintptr) {
+			operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
+		})
+		if err == nil {
+			err = operr
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if b.ipv6 != nil {
+		fd, err := b.ipv6.SyscallConn()
+		if err != nil {
+			return err
+		}
+		err = fd.Control(func(fd uintptr) {
+			operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
+		})
+		if err == nil {
+			err = operr
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b *NetBind) Send(bufs [][]byte, endpoint Endpoint) error {
+	b.mu.Lock()
+	is6 := false
+	conn := b.ipv4
+	br := batchWriter(b.ipv4PC)
+	offload := b.ipv4TxOffload
+	blackhole := b.blackhole4
+	if endpoint.DstIP().Is6() {
+		is6 = true
+		conn = b.ipv6
+		br = b.ipv6PC
+		offload = b.ipv6TxOffload
+		blackhole = b.blackhole6
+	}
+	b.mu.Unlock()
+	if blackhole {
+		return nil
+	}
+	if conn == nil {
+		return syscall.EAFNOSUPPORT
+	}
+	msgs := b.getMessages()
+	defer b.putMessages(msgs)
+	udpAddr := b.udpAddrPool.Get().(*net.UDPAddr)
+	defer b.udpAddrPool.Put(udpAddr)
+	if is6 {
+		as16 := endpoint.DstIP().As16()
+		copy(udpAddr.IP, as16[:])
+		udpAddr.IP = udpAddr.IP[:16]
+	} else {
+		as4 := endpoint.DstIP().As4()
+		copy(udpAddr.IP, as4[:])
+		udpAddr.IP = udpAddr.IP[:4]
+	}
+	udpAddr.Port = int(endpoint.(*NetEndpoint).Port())
+	var (
+		retried bool
+		err     error
+	)
+	for {
+		if offload {
+			n := coalesceMessages(udpAddr, endpoint.(*NetEndpoint), bufs, *msgs, setGSOSize)
+			err = send(br, (*msgs)[:n])
+			if err != nil && offload && errShouldDisableUDPGSO(err) {
+				offload = false
+				b.mu.Lock()
+				if is6 {
+					b.ipv6TxOffload = false
+				} else {
+					b.ipv4TxOffload = false
+				}
+				b.mu.Unlock()
+				retried = true
+				continue
+			}
+		} else {
+			for i := range bufs {
+				(*msgs)[i].Addr = udpAddr
+				(*msgs)[i].Buffers[0] = bufs[i]
+				setSrcControl(&(*msgs)[i].OOB, endpoint.(*NetEndpoint))
+			}
+			err = send(br, (*msgs)[:len(bufs)])
+		}
+		if retried {
+			return ErrUDPGSODisabled{onLocalAddr: conn.LocalAddr().String(), RetryErr: err}
+		}
+		return err
+	}
+}
+
+func send(bw batchWriter, msgs []ipv6.Message) error {
+	var (
+		n      int
+		err    error
+		offset int
+	)
+	for {
+		n, err = bw.WriteBatch(msgs[offset:], 0)
+		if err != nil || n == len(msgs[offset:]) {
+			break
+		}
+		offset += n
+	}
+	return err
+}
+
+func (*NetBind) ParseEndpoint(s string) (Endpoint, error) {
+	ap, err := netip.ParseAddrPort(s)
+	if err != nil {
+		return nil, err
+	}
+	return &NetEndpoint{
+		AddrPort: ap,
+	}, nil
+}
+
 func (b *NetBind) BatchSize() int {
 	return BatchSize
 }
 
-func supportsUDPOffload(conn *net.UDPConn) (txOffload, rxOffload bool) {
-	rawConn, err := conn.SyscallConn()
-	if err != nil {
-		return
-	}
-	if err := rawConn.Control(func(fd uintptr) {
-		// GetsockoptInt retrieves integer socket options.
-		// IPPROTO_UDP: identifies UDP protocol in system calls. Used when
-		// 	creating raw sockets or setting protocol-specific options.
-		// UDP_SEGMENT: enables UDP segmentation offload. It allows the kernel
-		//  to handle segmentation of large UDP datagrams into MTU-sized packets,
-		//  reducing CPU overhead.
-		_, errSyscall := unix.GetsockoptInt(int(fd), unix.IPPROTO_UDP, unix.UDP_SEGMENT)
-		txOffload = errSyscall == nil
-		// UDP_GRO: is the receive-side counterpart to UDP_SEGMENT.
-		//  It enables UDP Generic Receive Offload, allowing the kernel/NIC
-		//  to reassemble multiple incoming packets into larger datagrams.
-		opt, errSyscall := unix.GetsockoptInt(int(fd), unix.IPPROTO_UDP, unix.UDP_GRO)
-		// opt == 0 (disabled)
-		// opt == 1 (enabled)
-		rxOffload = errSyscall == nil && opt == 1
-	}); err != nil {
-		return false, false
-	}
-	return txOffload, rxOffload
-}
-
-func (b *NetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
+func (b *NetBind) makeReceiveIPv4(pc *ipv4.PacketConn, rxOffload bool) ReceiveFunc {
 	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return b.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
+		return b.receiveIP(pc, rxOffload, bufs, sizes, eps)
 	}
 }
 
-func (b *NetBind) makeReceiveIPv6(pc *ipv6.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
+func (b *NetBind) makeReceiveIPv6(pc *ipv6.PacketConn, rxOffload bool) ReceiveFunc {
 	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return b.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
+		return b.receiveIP(pc, rxOffload, bufs, sizes, eps)
 	}
 }
 
@@ -303,7 +398,6 @@ func (b *NetBind) getMessages() *[]ipv6.Message {
 
 func (b *NetBind) receiveIP(
 	br batchReader,
-	conn *net.UDPConn,
 	rxOffload bool,
 	bufs [][]byte,
 	sizes []int,
@@ -345,6 +439,85 @@ func (b *NetBind) receiveIP(
 		eps[i] = ep
 	}
 	return numMsgs, nil
+}
+
+func supportsUDPOffload(conn *net.UDPConn) (txOffload, rxOffload bool) {
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		return
+	}
+	if err := rawConn.Control(func(fd uintptr) {
+		// GetsockoptInt retrieves integer socket options.
+		// IPPROTO_UDP: identifies UDP protocol in system calls. Used when
+		// 	creating raw sockets or setting protocol-specific options.
+		// UDP_SEGMENT: enables UDP segmentation offload. It allows the kernel
+		//  to handle segmentation of large UDP datagrams into MTU-sized packets,
+		//  reducing CPU overhead.
+		_, errSyscall := unix.GetsockoptInt(int(fd), unix.IPPROTO_UDP, unix.UDP_SEGMENT)
+		txOffload = errSyscall == nil
+		// UDP_GRO: is the receive-side counterpart to UDP_SEGMENT.
+		//  It enables UDP Generic Receive Offload, allowing the kernel/NIC
+		//  to reassemble multiple incoming packets into larger datagrams.
+		opt, errSyscall := unix.GetsockoptInt(int(fd), unix.IPPROTO_UDP, unix.UDP_GRO)
+		// opt == 0 (disabled)
+		// opt == 1 (enabled)
+		rxOffload = errSyscall == nil && opt == 1
+	}); err != nil {
+		return false, false
+	}
+	return txOffload, rxOffload
+}
+
+type setGSOFunc func(control *[]byte, gsoSize uint16)
+
+func coalesceMessages(addr *net.UDPAddr, ep *NetEndpoint, bufs [][]byte, msgs []ipv6.Message, setGSO setGSOFunc) int {
+	var (
+		base     = -1 // index of msg we are currently coalescing into
+		gsoSize  int  // segmentation size of msgs[base]
+		dgramCnt int  // number of dgrams coalesced into msgs[base]
+		endBatch bool // tracking flag to start a new batch on next iteration of bufs
+	)
+	maxPayloadLen := maxIPv4PayloadLen
+	if ep.DstIP().Is6() {
+		maxPayloadLen = maxIPv6PayloadLen
+	}
+	for i, buf := range bufs {
+		if i > 0 {
+			msgLen := len(buf)
+			baseLenBefore := len(msgs[base].Buffers[0])
+			freeBaseCap := cap(msgs[base].Buffers[0]) - baseLenBefore
+			if msgLen+baseLenBefore <= maxPayloadLen &&
+				msgLen <= gsoSize &&
+				msgLen <= freeBaseCap &&
+				dgramCnt < udpSegmentMaxDatagrams &&
+				!endBatch {
+				msgs[base].Buffers[0] = append(msgs[base].Buffers[0], buf...)
+				if i == len(bufs)-1 {
+					setGSO(&msgs[base].OOB, uint16(gsoSize))
+				}
+				dgramCnt++
+				if msgLen < gsoSize {
+					// A smaller than gsoSize packet on the tail is legal, but
+					// it must end the batch.
+					endBatch = true
+				}
+				continue
+			}
+		}
+		if dgramCnt > 1 {
+			setGSO(&msgs[base].OOB, uint16(gsoSize))
+		}
+		// Reset prior to incrementing base since we are preparing to start a
+		// new potential batch.
+		endBatch = false
+		base++
+		gsoSize = len(buf)
+		setSrcControl(&msgs[base].OOB, ep)
+		msgs[base].Buffers[0] = buf
+		msgs[base].Addr = addr
+		dgramCnt = 1
+	}
+	return base + 1
 }
 
 type getGSOFunc func(control []byte) (int, error)
@@ -391,4 +564,30 @@ func splitCoalescedMessages(msgs []ipv6.Message, firstMsgAt int, getGSO getGSOFu
 		}
 	}
 	return n, nil
+}
+
+func errShouldDisableUDPGSO(err error) bool {
+	var serr *os.SyscallError
+	if errors.As(err, &serr) {
+		// EIO is returned by udp_send_skb() if the device driver does not have
+		// tx checksumming enabled, which is a hard requirement of UDP_SEGMENT.
+		// See:
+		// https://git.kernel.org/pub/scm/docs/man-pages/man-pages.git/tree/man7/udp.7?id=806eabd74910447f21005160e90957bde4db0183#n228
+		// https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/net/ipv4/udp.c?h=v6.2&id=c9c3395d5e3dcc6daee66c6908354d47bf98cb0c#n942
+		return serr.Err == unix.EIO
+	}
+	return false
+}
+
+type ErrUDPGSODisabled struct {
+	onLocalAddr string
+	RetryErr    error
+}
+
+func (e ErrUDPGSODisabled) Error() string {
+	return fmt.Sprintf("disabled UDP GSO on %s, NIC(s) may not support checksum offload", e.onLocalAddr)
+}
+
+func (e ErrUDPGSODisabled) Unwrap() error {
+	return e.RetryErr
 }
