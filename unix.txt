@@ -391,6 +391,7 @@ packets in the kernel space, improving performance for large UDP transmissions.
 
 CmsgLen
 Description: calculates the exact length of a control message (ancillary data) including its header.
+Argument is data length!
 
 CmsgSpace
 Description: calculates the buffer space needed for control messages (ancillary data) including proper alignment for the next control message.
@@ -520,3 +521,8 @@ ancillary data containing struct in6_pktinfo with each received packet:
 IPV6_V6ONLY
 Description: socket option that controls whether an IPv6 socket
 can also handle IPv4 connections via IPv4-mapped IPv6 addresses.
+
+SO_MARK
+Description: socket option mark. Sets a firewall mark on the socket.
+All packets sent through this socket will be tagged with the specified mark.
+Used for policy routing, packet filtering, etc.

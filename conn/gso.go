@@ -28,6 +28,7 @@ var gsoControlSize = unix.CmsgSpace(sizeOfGSOData)
 // }
 
 // getGSOSize parses control for UDP_GRO and if found returns its GSO size data.
+// control is Message.OOB.
 func getGSOSize(control []byte) (int, error) {
 	var (
 		hdr       unix.Cmsghdr

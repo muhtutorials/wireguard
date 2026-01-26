@@ -3,7 +3,6 @@ package conn
 import (
 	"fmt"
 	"net"
-	"runtime"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -24,6 +23,79 @@ type controlFn func(network, address string, c syscall.RawConn) error
 // controlFns is a list of functions that are called from the listen config
 // that can apply socket options.
 var controlFns = []controlFn{}
+
+// listenConfig returns a net.ListenConfig that applies the controlFns to the
+// socket prior to bind. This is used to apply socket buffer sizing and packet
+// information OOB configuration for sticky sockets.
+func listenConfig() *net.ListenConfig {
+	return &net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			for _, fn := range controlFns {
+				if err := fn(network, address, c); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func init() {
+	controlFns = append(controlFns,
+		// Attempt to set the socket buffer size beyond net.core.{r,w}mem_max by
+		// using SO_*BUFFORCE. This requires CAP_NET_ADMIN, and is allowed here to
+		// fail silently - the result of failure is lower performance on very fast
+		// links or high latency links.
+		func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				// set up to *mem_max
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, socketBufferSize)
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, socketBufferSize)
+				// set beyond *mem_max if CAP_NET_ADMIN
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, socketBufferSize)
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUFFORCE, socketBufferSize)
+			})
+		},
+		// Enable receiving of the packet information (IP_PKTINFO for IPv4,
+		// IPV6_PKTINFO for IPv6) that is used to implement sticky socket support.
+		func(network, address string, c syscall.RawConn) error {
+			var err error
+			switch network {
+			case "udp4":
+				c.Control(func(fd uintptr) {
+					err = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_PKTINFO, 1)
+				})
+			case "udp6":
+				c.Control(func(fd uintptr) {
+					if err = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_RECVPKTINFO, 1); err != nil {
+						return
+					}
+					err = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1)
+				})
+			default:
+				err = fmt.Errorf("unhandled network: %s: %w", network, unix.EINVAL)
+			}
+			return err
+		},
+		// attempt to enable UDP_GRO
+		func(network, address string, c syscall.RawConn) error {
+			// Kernels below 5.12 are missing 98184612aca0 ("net:
+			// udp: Add support for getsockopt(..., ..., UDP_GRO,
+			// ..., ...);"), which means we can't read this back
+			// later. We could pipe the return value through to
+			// the rest of the code, but UDP_GRO is kind of buggy
+			// anyway, so just gate this here.
+			major, minor := kernelVersion()
+			if major < 5 || (major == 5 && minor < 12) {
+				return nil
+			}
+			c.Control(func(fd uintptr) {
+				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_UDP, unix.UDP_GRO, 1)
+			})
+			return nil
+		},
+	)
+}
 
 // taken from go/src/internal/syscall/unix/kernel_version_linux.go
 func kernelVersion() (major, minor int) {
@@ -50,82 +122,4 @@ func kernelVersion() (major, minor int) {
 		}
 	}
 	return values[0], values[1]
-}
-
-func init() {
-	controlFns = append(controlFns,
-		// Attempt to set the socket buffer size beyond net.core.{r,w}mem_max by
-		// using SO_*BUFFORCE. This requires CAP_NET_ADMIN, and is allowed here to
-		// fail silently - the result of failure is lower performance on very fast
-		// links or high latency links.
-		func(network, address string, c syscall.RawConn) error {
-			return c.Control(func(fd uintptr) {
-				// Set up to *mem_max
-				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, socketBufferSize)
-				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, socketBufferSize)
-				// Set beyond *mem_max if CAP_NET_ADMIN
-				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, socketBufferSize)
-				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUFFORCE, socketBufferSize)
-			})
-		},
-		// Enable receiving of the packet information (IP_PKTINFO for IPv4,
-		// IPV6_PKTINFO for IPv6) that is used to implement sticky socket support.
-		func(network, address string, c syscall.RawConn) error {
-			var err error
-			switch network {
-			case "udp4":
-				if runtime.GOOS != "android" {
-					c.Control(func(fd uintptr) {
-						err = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_PKTINFO, 1)
-					})
-				}
-			case "udp6":
-				c.Control(func(fd uintptr) {
-					if runtime.GOOS != "android" {
-						err = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_RECVPKTINFO, 1)
-						if err != nil {
-							return
-						}
-					}
-					err = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_V6ONLY, 1)
-				})
-			default:
-				err = fmt.Errorf("unhandled network: %s: %w", network, unix.EINVAL)
-			}
-			return err
-		},
-		// Attempt to enable UDP_GRO
-		func(network, address string, c syscall.RawConn) error {
-			// Kernels below 5.12 are missing 98184612aca0 ("net:
-			// udp: Add support for getsockopt(..., ..., UDP_GRO,
-			// ..., ...);"), which means we can't read this back
-			// later. We could pipe the return value through to
-			// the rest of the code, but UDP_GRO is kind of buggy
-			// anyway, so just gate this here.
-			major, minor := kernelVersion()
-			if major < 5 || (major == 5 && minor < 12) {
-				return nil
-			}
-			c.Control(func(fd uintptr) {
-				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_UDP, unix.UDP_GRO, 1)
-			})
-			return nil
-		},
-	)
-}
-
-// listenConfig returns a net.ListenConfig that applies the controlFns to the
-// socket prior to bind. This is used to apply socket buffer sizing and packet
-// information OOB configuration for sticky sockets.
-func listenConfig() *net.ListenConfig {
-	return &net.ListenConfig{
-		Control: func(network, address string, c syscall.RawConn) error {
-			for _, fn := range controlFns {
-				if err := fn(network, address, c); err != nil {
-					return err
-				}
-			}
-			return nil
-		},
-	}
 }

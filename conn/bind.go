@@ -48,13 +48,23 @@ var (
 )
 
 type NetBind struct {
-	ipv4          *net.UDPConn
-	ipv6          *net.UDPConn
-	ipv4PC        *ipv4.PacketConn
-	ipv6PC        *ipv6.PacketConn
+	ipv4   *net.UDPConn
+	ipv6   *net.UDPConn
+	ipv4PC *ipv4.PacketConn
+	ipv6PC *ipv6.PacketConn
+	// GSO (Generic Segmentation Offload)
+	// Application combines several packets into one,
+	// sends to kernel, kernel sends to NIC,
+	// NIC splits one large packet into several standard packets,
+	// and sends them over the network.
 	ipv4TxOffload bool
+	// GRO (Generic Receive Offload)
+	// NIC combines multiple incoming packets into one large packet,
+	// kernel delivers them as a single packet to application.
 	ipv4RxOffload bool
+	// same as ipv4TxOffload but for IPv6
 	ipv6TxOffload bool
+	// same as ipv4RxOffload but for IPv6
 	ipv6RxOffload bool
 	// these two fields are not guarded by mu
 	udpAddrPool sync.Pool
@@ -105,6 +115,8 @@ type NetEndpoint struct {
 	// 	Which local IP received an incoming packet.
 	// 	Which interface received it.
 	// 	Which source IP to use when replying.
+	// "hdr + data" from this function:
+	// hdr, data, remaining, err = unix.ParseOneSocketControlMessage(msg.OOB[:msg.NN])
 	src []byte
 }
 
@@ -179,24 +191,100 @@ func (b *NetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 		}
 		var fns []ReceiveFunc
 		if v4conn != nil {
-			b.ipv4TxOffload, b.ipv4RxOffload = supportsUDPOffload(v4conn)
+			b.ipv4 = v4conn
 			v4pc = ipv4.NewPacketConn(v4conn)
 			b.ipv4PC = v4pc
+			b.ipv4TxOffload, b.ipv4RxOffload = supportsUDPOffload(v4conn)
 			fns = append(fns, b.makeReceiveIPv4(v4pc, b.ipv4RxOffload))
-			b.ipv4 = v4conn
 		}
 		if v6conn != nil {
-			b.ipv6TxOffload, b.ipv6RxOffload = supportsUDPOffload(v6conn)
+			b.ipv6 = v6conn
 			v6pc = ipv6.NewPacketConn(v6conn)
 			b.ipv6PC = v6pc
+			b.ipv6TxOffload, b.ipv6RxOffload = supportsUDPOffload(v6conn)
 			fns = append(fns, b.makeReceiveIPv6(v6pc, b.ipv6RxOffload))
-			b.ipv6 = v6conn
 		}
 		if len(fns) == 0 {
 			return nil, 0, syscall.EAFNOSUPPORT
 		}
 		return fns, uint16(port), nil
 	}
+}
+
+func (b *NetBind) makeReceiveIPv4(pc *ipv4.PacketConn, rxOffload bool) ReceiveFunc {
+	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
+		return b.receive(pc, rxOffload, bufs, sizes, eps)
+	}
+}
+
+func (b *NetBind) makeReceiveIPv6(pc *ipv6.PacketConn, rxOffload bool) ReceiveFunc {
+	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
+		return b.receive(pc, rxOffload, bufs, sizes, eps)
+	}
+}
+
+func (b *NetBind) receive(
+	br batchReader,
+	rxOffload bool,
+	bufs [][]byte,
+	sizes []int, // lens of data read into bufs
+	eps []Endpoint,
+) (n int, err error) {
+	msgs := b.getMessages()
+	// bufs: application-owned buffers
+	// msgs: system call structures
+	// We connect them: msgs[i].Buffers[0] = bufs[i]
+	// When ReadBatch() reads data, it goes directly into bufs[i]
+	for i := range bufs {
+		// The design "Buffers [][]byte" supports scatter/gather operations (vectored I/O),
+		// even though the current code doesn't use it.
+		// Potential future use:
+		// Receive packet into multiple buffers
+		// msg.Buffers[0] = headerBuffer[:20]    // IP/UDP headers
+		// msg.Buffers[1] = payloadBuffer[:1400] // Actual data
+		// One recvmsg() fills both buffers.
+		(*msgs)[i].Buffers[0] = bufs[i]
+		// set len = cap
+		(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
+	}
+	defer b.putMessages(msgs)
+	var numMsgs int
+	if rxOffload {
+		// len(*msgs): total number of message buffers available (128)
+		// BatchSize: maximum number of packets handled per read and write (128)
+		// udpSegmentMaxDatagrams: maximum number of UDP packets that can be coalesced (64)
+		// "BatchSize / udpSegmentMaxDatagrams": minimum number of merged packets needed
+		// readAt := 128 - (128 / 64) = 126
+		// We read starting at index 126, using only 2 message buffers for reading.
+		// Result: up to 2 packets containing merged data.
+		// Then split it into up to 128 individual packets.
+		readAt := len(*msgs) - (BatchSize / udpSegmentMaxDatagrams)
+		numMsgs, err = br.ReadBatch((*msgs)[readAt:], 0)
+		if err != nil {
+			return 0, err
+		}
+		numMsgs, err = splitCoalescedMessages(*msgs, readAt, getGSOSize)
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		numMsgs, err = br.ReadBatch(*msgs, 0)
+		if err != nil {
+			return 0, err
+		}
+	}
+	for i := 0; i < numMsgs; i++ {
+		msg := &(*msgs)[i]
+		sizes[i] = msg.N
+		if sizes[i] == 0 {
+			continue
+		}
+		addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
+		ep := &NetEndpoint{AddrPort: addrPort} // TODO: remove allocation
+		getSrcFromControl(msg.OOB[:msg.NN], ep)
+		eps[i] = ep
+	}
+	return numMsgs, nil
 }
 
 func (b *NetBind) Close() error {
@@ -225,8 +313,10 @@ func (b *NetBind) Close() error {
 	return err2
 }
 
-var fwmarkIoctl int = 36
-
+// SetMark sets a firewall mark on the socket.
+// All packets sent through this socket will be
+// tagged with the specified mark.
+// Used for policy routing, packet filtering, etc.
 func (b *NetBind) SetMark(mark uint32) error {
 	var operr error
 	if b.ipv4 != nil {
@@ -235,7 +325,7 @@ func (b *NetBind) SetMark(mark uint32) error {
 			return err
 		}
 		err = fd.Control(func(fd uintptr) {
-			operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
+			operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, int(mark))
 		})
 		if err == nil {
 			err = operr
@@ -250,7 +340,7 @@ func (b *NetBind) SetMark(mark uint32) error {
 			return err
 		}
 		err = fd.Control(func(fd uintptr) {
-			operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
+			operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, int(mark))
 		})
 		if err == nil {
 			err = operr
@@ -362,26 +452,6 @@ func (b *NetBind) BatchSize() int {
 	return BatchSize
 }
 
-func (b *NetBind) makeReceiveIPv4(pc *ipv4.PacketConn, rxOffload bool) ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return b.receiveIP(pc, rxOffload, bufs, sizes, eps)
-	}
-}
-
-func (b *NetBind) makeReceiveIPv6(pc *ipv6.PacketConn, rxOffload bool) ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return b.receiveIP(pc, rxOffload, bufs, sizes, eps)
-	}
-}
-
-type batchReader interface {
-	ReadBatch([]ipv6.Message, int) (int, error)
-}
-
-type batchWriter interface {
-	WriteBatch([]ipv6.Message, int) (int, error)
-}
-
 func (b *NetBind) putMessages(msgs *[]ipv6.Message) {
 	for i := range *msgs {
 		(*msgs)[i].OOB = (*msgs)[i].OOB[:0]
@@ -396,49 +466,12 @@ func (b *NetBind) getMessages() *[]ipv6.Message {
 	return b.msgsPool.Get().(*[]ipv6.Message)
 }
 
-func (b *NetBind) receiveIP(
-	br batchReader,
-	rxOffload bool,
-	bufs [][]byte,
-	sizes []int,
-	eps []Endpoint,
-) (n int, err error) {
-	msgs := b.getMessages()
-	for i := range bufs {
-		(*msgs)[i].Buffers[0] = bufs[i]
-		// set len = cap
-		(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
-	}
-	defer b.putMessages(msgs)
-	var numMsgs int
-	if rxOffload {
-		readAt := len(*msgs) - (BatchSize / udpSegmentMaxDatagrams)
-		numMsgs, err = br.ReadBatch((*msgs)[readAt:], 0)
-		if err != nil {
-			return 0, err
-		}
-		numMsgs, err = splitCoalescedMessages(*msgs, readAt, getGSOSize)
-		if err != nil {
-			return 0, err
-		}
-	} else {
-		numMsgs, err = br.ReadBatch(*msgs, 0)
-		if err != nil {
-			return 0, err
-		}
-	}
-	for i := 0; i < numMsgs; i++ {
-		msg := &(*msgs)[i]
-		sizes[i] = msg.N
-		if sizes[i] == 0 {
-			continue
-		}
-		addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
-		ep := &NetEndpoint{AddrPort: addrPort} // TODO: remove allocation
-		getSrcFromControl(msg.OOB[:msg.NN], ep)
-		eps[i] = ep
-	}
-	return numMsgs, nil
+type batchReader interface {
+	ReadBatch(msgs []ipv6.Message, flags int) (int, error)
+}
+
+type batchWriter interface {
+	WriteBatch(msgs []ipv6.Message, flags int) (int, error)
 }
 
 func supportsUDPOffload(conn *net.UDPConn) (txOffload, rxOffload bool) {
@@ -530,15 +563,16 @@ func splitCoalescedMessages(msgs []ipv6.Message, firstMsgAt int, getGSO getGSOFu
 		}
 		var (
 			gsoSize    int
+			numToSplit = 1
 			start      int
 			end        = msg.N
-			numToSplit = 1
 		)
 		gsoSize, err = getGSO(msg.OOB[:msg.NN])
 		if err != nil {
 			return n, err
 		}
 		if gsoSize > 0 {
+			// number of packets which coalesced packet will be split into
 			numToSplit = (msg.N + gsoSize - 1) / gsoSize
 			end = gsoSize
 		}
@@ -556,6 +590,16 @@ func splitCoalescedMessages(msgs []ipv6.Message, firstMsgAt int, getGSO getGSOFu
 			}
 			n++
 		}
+		// The last split case (i == n-1):
+		// When the last split packet happens to be placed in the same memory slot as the original packet:
+		// The data was already "moved in place" during the copy operation.
+		// Zeroing msg.N = 0 would mark this slot as empty, but it actually contains valid data.
+		// This would cause the last packet to be lost.
+		// i != n-1:
+		// When split packets go into different slots:
+		// The original slot no longer contains valid packet data after splitting.
+		// We need to mark it as empty with msg.N = 0 so it won't be processed again,
+		// in case we don't overwrite it by placing split packet in it.
 		if i != n-1 {
 			// It is legal for bytes to move within msg.Buffers[0] as a result
 			// of splitting, so we only zero the source msg len when it is not

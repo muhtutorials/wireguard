@@ -1,6 +1,5 @@
 // sticky sockets is preservation and reuse of source address information
 // (IP address and interface index) across multiple send operations.
-
 package conn
 
 import (
