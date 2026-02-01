@@ -33,7 +33,7 @@ const (
 	// 	- Defined in include/linux/skbuff.h: UDP_MAX_SEGMENTS.
 	// 	- Limits memory and processing per batch.
 	// 	- Balances efficiency with latency.
-	udpSegmentMaxDatagrams = 64
+	maxUDPSegments = 64
 )
 
 var (
@@ -115,7 +115,7 @@ type NetEndpoint struct {
 	// 	Which local IP received an incoming packet.
 	// 	Which interface received it.
 	// 	Which source IP to use when replying.
-	// "hdr + data" from this function:
+	// src is msg.OOB or "hdr + data" from this function:
 	// hdr, data, remaining, err = unix.ParseOneSocketControlMessage(msg.OOB[:msg.NN])
 	src []byte
 }
@@ -258,12 +258,12 @@ func (b *NetBind) receive(
 		// We read starting at index 126, using only 2 message buffers for reading.
 		// Result: up to 2 packets containing merged data.
 		// Then split it into up to 128 individual packets.
-		readAt := len(*msgs) - (BatchSize / udpSegmentMaxDatagrams)
+		readAt := len(*msgs) - (BatchSize / maxUDPSegments)
 		numMsgs, err = br.ReadBatch((*msgs)[readAt:], 0)
 		if err != nil {
 			return 0, err
 		}
-		numMsgs, err = splitCoalescedMessages(*msgs, readAt, getGSOSize)
+		numMsgs, err = splitMessages(*msgs, readAt, getGSOSize)
 		if err != nil {
 			return 0, err
 		}
@@ -424,9 +424,8 @@ func (b *NetBind) Send(bufs [][]byte, endpoint Endpoint) error {
 
 func send(bw batchWriter, msgs []ipv6.Message) error {
 	var (
-		n      int
-		err    error
-		offset int
+		n, offset int
+		err       error
 	)
 	for {
 		n, err = bw.WriteBatch(msgs[offset:], 0)
@@ -454,10 +453,15 @@ func (b *NetBind) BatchSize() int {
 
 func (b *NetBind) putMessages(msgs *[]ipv6.Message) {
 	for i := range *msgs {
-		(*msgs)[i].OOB = (*msgs)[i].OOB[:0]
 		// new ipv6.Message zeroes out fields, slices are reused
-		// TODO: why aren't Buffers cleared?
-		(*msgs)[i] = ipv6.Message{Buffers: (*msgs)[i].Buffers, OOB: (*msgs)[i].OOB}
+		(*msgs)[i] = ipv6.Message{
+			// (*msgs)[i].Buffers doesn't need to be zeroed out, because
+			// buf is assigned to (*msgs)[i].Buffers[0] every time msgs popped
+			// from the msgsPool. (*msgs)[i].Buffers contains only one slice
+			// (new func: msgs[i].Buffers = make(net.Buffers, 1))
+			Buffers: (*msgs)[i].Buffers,
+			OOB:     (*msgs)[i].OOB[:0],
+		}
 	}
 	b.msgsPool.Put(msgs)
 }
@@ -501,61 +505,9 @@ func supportsUDPOffload(conn *net.UDPConn) (txOffload, rxOffload bool) {
 	return txOffload, rxOffload
 }
 
-type setGSOFunc func(control *[]byte, gsoSize uint16)
-
-func coalesceMessages(addr *net.UDPAddr, ep *NetEndpoint, bufs [][]byte, msgs []ipv6.Message, setGSO setGSOFunc) int {
-	var (
-		base     = -1 // index of msg we are currently coalescing into
-		gsoSize  int  // segmentation size of msgs[base]
-		dgramCnt int  // number of dgrams coalesced into msgs[base]
-		endBatch bool // tracking flag to start a new batch on next iteration of bufs
-	)
-	maxPayloadLen := maxIPv4PayloadLen
-	if ep.DstIP().Is6() {
-		maxPayloadLen = maxIPv6PayloadLen
-	}
-	for i, buf := range bufs {
-		if i > 0 {
-			msgLen := len(buf)
-			baseLenBefore := len(msgs[base].Buffers[0])
-			freeBaseCap := cap(msgs[base].Buffers[0]) - baseLenBefore
-			if msgLen+baseLenBefore <= maxPayloadLen &&
-				msgLen <= gsoSize &&
-				msgLen <= freeBaseCap &&
-				dgramCnt < udpSegmentMaxDatagrams &&
-				!endBatch {
-				msgs[base].Buffers[0] = append(msgs[base].Buffers[0], buf...)
-				if i == len(bufs)-1 {
-					setGSO(&msgs[base].OOB, uint16(gsoSize))
-				}
-				dgramCnt++
-				if msgLen < gsoSize {
-					// A smaller than gsoSize packet on the tail is legal, but
-					// it must end the batch.
-					endBatch = true
-				}
-				continue
-			}
-		}
-		if dgramCnt > 1 {
-			setGSO(&msgs[base].OOB, uint16(gsoSize))
-		}
-		// Reset prior to incrementing base since we are preparing to start a
-		// new potential batch.
-		endBatch = false
-		base++
-		gsoSize = len(buf)
-		setSrcControl(&msgs[base].OOB, ep)
-		msgs[base].Buffers[0] = buf
-		msgs[base].Addr = addr
-		dgramCnt = 1
-	}
-	return base + 1
-}
-
 type getGSOFunc func(control []byte) (int, error)
 
-func splitCoalescedMessages(msgs []ipv6.Message, firstMsgAt int, getGSO getGSOFunc) (n int, err error) {
+func splitMessages(msgs []ipv6.Message, firstMsgAt int, getGSO getGSOFunc) (n int, err error) {
 	for i := firstMsgAt; i < len(msgs); i++ {
 		msg := &msgs[i]
 		if msg.N == 0 {
@@ -608,6 +560,58 @@ func splitCoalescedMessages(msgs []ipv6.Message, firstMsgAt int, getGSO getGSOFu
 		}
 	}
 	return n, nil
+}
+
+type setGSOFunc func(control *[]byte, gsoSize uint16)
+
+func coalesceMessages(addr *net.UDPAddr, ep *NetEndpoint, bufs [][]byte, msgs []ipv6.Message, setGSO setGSOFunc) int {
+	var (
+		i           = -1 // index of msg we are currently coalescing into
+		packetCount int  // number of packets coalesced into msgs[i]
+		gsoSize     int  // segmentation size of msgs[i]
+		endBatch    bool // tracking flag to start a new batch on next iteration of bufs
+	)
+	maxPayloadLen := maxIPv4PayloadLen
+	if ep.DstIP().Is6() {
+		maxPayloadLen = maxIPv6PayloadLen
+	}
+	for j, buf := range bufs {
+		if j > 0 {
+			bufLen := len(buf)
+			msgLen := len(msgs[i].Buffers[0])
+			available := cap(msgs[i].Buffers[0]) - msgLen
+			if bufLen+msgLen <= maxPayloadLen &&
+				bufLen <= gsoSize &&
+				bufLen <= available &&
+				packetCount < maxUDPSegments &&
+				!endBatch {
+				msgs[i].Buffers[0] = append(msgs[i].Buffers[0], buf...)
+				if j == len(bufs)-1 {
+					setGSO(&msgs[i].OOB, uint16(gsoSize))
+				}
+				packetCount++
+				if bufLen < gsoSize {
+					// A smaller than gsoSize packet on the tail is legal, but
+					// it must end the batch.
+					endBatch = true
+				}
+				continue
+			}
+		}
+		if packetCount > 1 {
+			setGSO(&msgs[i].OOB, uint16(gsoSize))
+		}
+		i++
+		packetCount = 1
+		gsoSize = len(buf)
+		// Reset prior to incrementing base since we are preparing to start a
+		// new potential batch.
+		endBatch = false
+		setSrcControl(&msgs[i].OOB, ep)
+		msgs[i].Buffers[0] = buf
+		msgs[i].Addr = addr
+	}
+	return i + 1
 }
 
 func errShouldDisableUDPGSO(err error) bool {

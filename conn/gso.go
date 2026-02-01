@@ -61,17 +61,25 @@ func setGSOSize(control *[]byte, gsoSize uint16) {
 	length := len(*control)
 	capacity := cap(*control)
 	available := capacity - length
-	// CmsgSpace = CmsgLen + padding
+	// func CmsgSpace(datalen int) int {
+	// 	return cmsgAlignOf(SizeofCmsghdr) + cmsgAlignOf(datalen)
+	// }
 	space := unix.CmsgSpace(sizeOfGSOData)
 	if available < space {
 		return
 	}
 	*control = (*control)[:capacity]
 	gsoControl := (*control)[length:]
-	hdr := (*unix.Cmsghdr)(unsafe.Pointer(&(gsoControl)[0]))
+	hdr := (*unix.Cmsghdr)(unsafe.Pointer(&gsoControl[0]))
 	hdr.Level = unix.SOL_UDP
 	hdr.Type = unix.UDP_SEGMENT
+	// func (cmsg *Cmsghdr) SetLen(length int) {
+	// 	cmsg.Len = uint64(length)
+	// }
+	// func CmsgLen(datalen int) int {
+	// 	return cmsgAlignOf(SizeofCmsghdr) + datalen
+	// }
 	hdr.SetLen(unix.CmsgLen(sizeOfGSOData))
-	copy((gsoControl)[unix.CmsgLen(0):], unsafe.Slice((*byte)(unsafe.Pointer(&gsoSize)), sizeOfGSOData))
+	copy(gsoControl[unix.CmsgLen(0):], unsafe.Slice((*byte)(unsafe.Pointer(&gsoSize)), sizeOfGSOData))
 	*control = (*control)[:length+space]
 }
