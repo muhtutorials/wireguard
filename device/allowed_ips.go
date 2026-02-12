@@ -10,9 +10,10 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"unsafe"
 )
 
-// parent indirection
+// Parent indirection. Used node removal optimization.
 type parent struct {
 	child      **node
 	childIndex uint8
@@ -42,9 +43,15 @@ type node struct {
 	shift uint8
 	// Network portion (CIDR bits) of IP address.
 	// Host bits are zeroed.
-	network     []byte
-	peer        *Peer
-	perPeerElem *list.Element
+	network []byte
+	peer    *Peer
+	// Peer can have multiple IPs which are stored in Peer.nodes list.
+	// peerNode is an element in that list.
+	// Peer.nodes is used for easy peer removal where you don't
+	// need to traverse the whole trie by comparing node.peer == peer
+	// to remove every node which belong to the peer.
+	// You can delete them directly by iterating Peer.nodes.
+	peerNode *list.Element
 }
 
 // commonBits calculates how many leading bits
@@ -80,13 +87,13 @@ func commonBits(ip1, ip2 []byte) uint8 {
 }
 
 func (n *node) addToPeerNodes() {
-	n.perPeerElem = n.peer.trieNodes.PushBack(n)
+	n.peerNode = n.peer.nodes.PushBack(n)
 }
 
 func (n *node) removeFromPeerNodes() {
-	if n.perPeerElem != nil {
-		n.peer.trieNodes.Remove(n.perPeerElem)
-		n.perPeerElem = nil
+	if n.peerNode != nil {
+		n.peer.nodes.Remove(n.peerNode)
+		n.peerNode = nil
 	}
 }
 
@@ -161,6 +168,7 @@ func (p parent) insert(ip []byte, cidr uint8, peer *Peer) {
 	parentNode, exact := (*p.child).nodePlacement(ip, cidr)
 	if exact {
 		parentNode.removeFromPeerNodes()
+		// replace peer with new peer
 		parentNode.peer = peer
 		parentNode.addToPeerNodes()
 		return
@@ -229,6 +237,102 @@ func (p parent) insert(ip []byte, cidr uint8, peer *Peer) {
 	}
 }
 
+// remove removes node (method receiver) from the trie.
+func (n *node) remove() {
+	n.removeFromPeerNodes()
+	n.peer = nil
+	// If node has two children, the trie remains intact,
+	// node becomes empty (n.peer == nil).
+	if n.children[0] != nil && n.children[1] != nil {
+		return
+	}
+	// node has one or zero children
+	index := 0
+	if n.children[0] == nil {
+		index = 1
+	}
+	child := n.children[index]
+	// If node has one child, this child becomes node's parent's child,
+	// i.e. child becomes node and node is removed from the trie.
+	if child != nil {
+		child.parent = n.parent
+	}
+	*n.parent.child = child
+	if n.children[0] != nil || n.children[1] != nil || n.parent.childIndex > 1 {
+		n.zeroOutPointers()
+		return
+	}
+	// type parent struct {
+	// 	child      **node
+	// 	childIndex uint8
+	// }
+	//
+	// type node struct {
+	// 	parent   parent
+	// 	children [2]*node
+	// 	...
+	// }
+	//
+	// func main() {
+	// 	child0 := &node{}
+	// 	child1 := &node{}
+	// 	parentNode := node{
+	// 		children: [2]*node{child0, child1},
+	// 	}
+	// 	child0.parent = parent{
+	// 		child:      &parentNode.children[0],
+	// 		childIndex: 0,
+	// 	}
+	// 	fmt.Printf("parentNode address %d\n", unsafe.Pointer(&parentNode))
+	// 	fmt.Println("parentNode.parent offset", unsafe.Offsetof(parentNode.parent))
+	// 	fmt.Println("parentNode.children offset", unsafe.Offsetof(parentNode.children))
+	// 	fmt.Printf("parentNode.children[0] address %d\n", unsafe.Pointer(parentNode.children[0]))
+	// 	fmt.Printf("parentNode.children[1] address %d\n", unsafe.Pointer(parentNode.children[1]))
+	// 	fmt.Printf("child0 address %d\n", unsafe.Pointer(child0))
+	// 	fmt.Printf("child1 address %d\n", unsafe.Pointer(child1))
+	// 	fmt.Printf("child0.parent.child address %d\n", unsafe.Pointer(child0.parent.child))
+	// }
+	//
+	// addresses are converted into decimals
+	// parentNode address 824634892352
+	// parentNode.parent offset 0
+	// parentNode.children offset 16
+	// parentNode.children[0] address 824634892288
+	// parentNode.children[1] address 824634892320
+	// child0 address 824634892288
+	// child1 address 824634892320
+	// child0.parent.child address 824634892368
+	//
+	// 					 		↓824634892368 mem addr of pointer to children[0]
+	//                    ↓mem addr of children[0] ↓mem addr of children[1]
+	// children: [2]*node{824634892288, 824634892320}
+	ptrToChildPtr := uintptr(unsafe.Pointer(n.parent.child))
+	childrenOffset := unsafe.Offsetof(n.children)
+	childOffset := unsafe.Sizeof(n.children[0]) * uintptr(n.parent.childIndex)
+	parentPtr := unsafe.Pointer(ptrToChildPtr - childrenOffset - childOffset)
+	parent := (*node)(parentPtr)
+	// If node has no children and parent node is not empty
+	// (parent.peer != nil), node is removed from the trie.
+	if parent.peer != nil {
+		n.zeroOutPointers()
+		return
+	}
+	// check another parent's child
+	child = parent.children[n.parent.childIndex^1]
+	// If node has no children, parent node is empty
+	// (parent.peer == nil) and parent node has another child,
+	// this child becomes new parent and both old parent and
+	// node are removed from the trie.
+	// If parent doesn't have another child, parent and
+	// node are removed from the trie.
+	if child != nil {
+		child.parent = parent.parent
+	}
+	*parent.parent.child = child
+	n.zeroOutPointers()
+	parent.zeroOutPointers()
+}
+
 type AllowedIPs struct {
 	IPv4 *node
 	IPv6 *node
@@ -241,7 +345,6 @@ func (ips *AllowedIPs) Insert(prefix netip.Prefix, peer *Peer) {
 	// `parent.childIndex = 2` signifies the root of the trie
 	if prefix.Addr().Is6() {
 		ip := prefix.Addr().As16()
-
 		parent{&ips.IPv6, 2}.insert(ip[:], uint8(prefix.Bits()), peer)
 	} else if prefix.Addr().Is4() {
 		ip := prefix.Addr().As4()
@@ -250,21 +353,3 @@ func (ips *AllowedIPs) Insert(prefix netip.Prefix, peer *Peer) {
 		panic(errors.New("inserting unknown address type"))
 	}
 }
-
-// type parentIndirection struct {
-// 	parentBit     **trieEntry
-// 	parentBitType uint8
-// }
-
-// type trieEntry struct {
-// 	peer        *Peer // 0
-// 	child       [2]*trieEntry // 8
-// 	parent      parentIndirection // 24
-// 	cidr        uint8
-// 	bitAtByte   uint8
-// 	bitAtShift  uint8
-// 	bits        []byte
-// 	perPeerElem *list.Element
-// }
-
-// parent := (*trieEntry)(unsafe.Pointer(uintptr(unsafe.Pointer(node.parent.parentBit)) - unsafe.Offsetof(node.child) - unsafe.Sizeof(node.child[0])*uintptr(node.parent.parentBitType)))

@@ -9,15 +9,15 @@ import (
 const (
 	// maximum sustained rate: 20 packets/second
 	packetsPerSecond = 20
-	// burst capacity: 5 extra packets allowed
-	PacketsBurst = 5
-	// cleanup interval for old tokens
-	cleanupInterval = time.Second
 	// time cost per packet in nanoseconds: 50_000_000ns (50ms)
 	// 1s = 1000_000_000ns
 	packetCost = 1000_000_000 / packetsPerSecond
+	// burst capacity: 5 extra packets allowed
+	packetsBurst = 5
 	// maximum token bucket capacity in nanoseconds: 250_000_000ns (250ms)
-	maxTokens = packetCost * PacketsBurst
+	maxTokens = packetCost * packetsBurst
+	// cleanup interval for old tokens
+	cleanupInterval = time.Second
 )
 
 type Ratelimiter struct {
