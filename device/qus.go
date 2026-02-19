@@ -18,22 +18,22 @@ const (
 	PreallocatedBufsPerPool = 0
 )
 
-// quOut is a channel of QuOutElems awaiting encryption.
+// quOut is a channel of QuOutItems awaiting encryption.
 // quOut is ref-counted using its wg field.
 // quOut created with newQuOut has one reference.
 // Every additional writer must call wg.Add(1).
 // Every completed writer must call wg.Done().
 // When no further writers will be added,
-// call wg.Done to remove the initial reference.
-// When the refcount hits 0, the queue's channel is closed.
+// call wg.Done() to remove the initial reference.
+// When the ref-count hits 0, the queue's channel is closed.
 type quOut struct {
-	c  chan *QuOutElems
+	c  chan *QuOutItemsSynced
 	wg sync.WaitGroup
 }
 
 func newQuOut() *quOut {
 	q := &quOut{
-		c: make(chan *QuOutElems, QuOutSize),
+		c: make(chan *QuOutItemsSynced, QuOutSize),
 	}
 	q.wg.Add(1)
 	go func() {
@@ -45,13 +45,13 @@ func newQuOut() *quOut {
 
 // QuIn is similar to quOut. See above.
 type quIn struct {
-	c  chan *QuInElems
+	c  chan *QuInItemsSynced
 	wg sync.WaitGroup
 }
 
 func newQuIn() *quIn {
 	q := &quIn{
-		c: make(chan *QuInElems, QuInSize),
+		c: make(chan *QuInItemsSynced, QuInSize),
 	}
 	q.wg.Add(1)
 	go func() {
@@ -63,13 +63,13 @@ func newQuIn() *quIn {
 
 // quHandshake is similar to quOut. See above.
 type quHandshake struct {
-	c  chan QuHandshakeElem
+	c  chan QuHandshake
 	wg sync.WaitGroup
 }
 
 func newQuHandshake() *quHandshake {
 	q := &quHandshake{
-		c: make(chan QuHandshakeElem, QuHandshakeSize),
+		c: make(chan QuHandshake, QuHandshakeSize),
 	}
 	q.wg.Add(1)
 	go func() {
@@ -80,7 +80,7 @@ func newQuHandshake() *quHandshake {
 }
 
 type quOutFlush struct {
-	c chan *QuOutElems
+	c chan *QuOutItemsSynced
 }
 
 // newQuOutFlush returns a channel that will be flushed when it gets GC'd.
@@ -90,7 +90,7 @@ type quOutFlush struct {
 // All sends to the channel must be best-effort, because there may be no receivers.
 func newQuOutFlush(d *Device) *quOutFlush {
 	q := &quOutFlush{
-		c: make(chan *QuOutElems, QuOutSize),
+		c: make(chan *QuOutItemsSynced, QuOutSize),
 	}
 	// SetFinalizer is analagous to drop method in Rust
 	runtime.SetFinalizer(q, d.flushQuOut)
@@ -100,13 +100,13 @@ func newQuOutFlush(d *Device) *quOutFlush {
 func (d *Device) flushQuOut(q *quOutFlush) {
 	for {
 		select {
-		case quOutElems := <-q.c:
-			quOutElems.Lock()
-			for _, elem := range quOutElems.elems {
-				d.PutMsgBuf(elem.buf)
-				d.PutOutElem(elem)
+		case quOutItems := <-q.c:
+			quOutItems.Lock()
+			for _, item := range quOutItems.items {
+				d.PutMsgBuf(item.buf)
+				d.PutOutItem(item)
 			}
-			d.putQuOutElems(quOutElems)
+			d.putQuOutItems(quOutItems)
 		default:
 			return
 		}
@@ -114,7 +114,7 @@ func (d *Device) flushQuOut(q *quOutFlush) {
 }
 
 type quInFlush struct {
-	c chan *QuInElems
+	c chan *QuInItemsSynced
 }
 
 // newQuInFlush returns a channel that will be flushed when it gets GC'd.
@@ -123,22 +123,22 @@ type quInFlush struct {
 // some other means, such as sending a sentinel nil values.
 func newQuInFlush(device *Device) *quInFlush {
 	q := &quInFlush{
-		c: make(chan *QuInElems, QuInSize),
+		c: make(chan *QuInItemsSynced, QuInSize),
 	}
 	runtime.SetFinalizer(q, device.flushQuIn)
 	return q
 }
 
-func (d *Device) flushInboundQueue(q *quInFlush) {
+func (d *Device) flushQuIn(q *quInFlush) {
 	for {
 		select {
-		case quInElems := <-q.c:
-			quInElems.Lock()
-			for _, elem := range quInElems.elems {
-				d.PutMsgBuf(elem.buf)
-				d.PutInElem(elem)
+		case quInItems := <-q.c:
+			quInItems.Lock()
+			for _, item := range quInItems.items {
+				d.PutMsgBuf(item.buf)
+				d.PutInItem(item)
 			}
-			d.PutQuInElems(quInElems)
+			d.PutQuInItems(quInItems)
 		default:
 			return
 		}

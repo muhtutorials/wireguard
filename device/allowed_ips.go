@@ -114,9 +114,11 @@ func (n *node) nodePlacement(ip []byte, cidr uint8) (parent *node, exact bool) {
 	return
 }
 
+// maskSelf discards (zeroes out) all bits that are not
+// in cidr range
 func (n *node) maskSelf() {
 	// addr = []byte{192, 168, 1, 5}
-	// cidr = 24
+	// cidr = 24 (first 24 bits)
 	// mask = []byte{255, 255, 255, 0}
 	// addr[0] &= 255  // 192 & 255 = 192
 	// addr[1] &= 255  // 168 & 255 = 168
@@ -151,8 +153,9 @@ func (n *node) zeroOutPointers() {
 func (p parent) insert(ip []byte, cidr uint8, peer *Peer) {
 	// p is the parent type with a child field which contains the root node.
 	// If parent has no child, add the inserted node as its child to be
-	// the first node in the trie and its root.
+	// the first and root node in the trie.
 	if *p.child == nil {
+		// trie is empty here, so we insert first node
 		newNode := &node{
 			parent: p,
 			cidr:   cidr,
@@ -169,7 +172,7 @@ func (p parent) insert(ip []byte, cidr uint8, peer *Peer) {
 	// Traverse the trie to find where to insert the new node.
 	// parentNode is the new node's parent.
 	parentNode, exact := (*p.child).nodePlacement(ip, cidr)
-	// Check if the new node is on the same network as its parent,
+	// Check if the new node has the same network address as its parent,
 	// if it is, just replace parent peer with new peer.
 	if exact {
 		parentNode.removeFromPeerNodes()
@@ -192,21 +195,25 @@ func (p parent) insert(ip []byte, cidr uint8, peer *Peer) {
 	if parentNode == nil {
 		// if new node has no parent start at the root
 		down = *p.child
-	} else { // new node has a parent node
-		// find new node's childindex
+	} else {
+		// New node has a parent node. Find new node's child index.
 		index := parentNode.childIndex(ip)
 		down = parentNode.children[index]
 		// Check if child slot is empty,
-		// if it is, insert there the new node.
+		// if it is, insert the new node there.
 		if down == nil {
 			newNode.parent = parent{&parentNode.children[index], index}
 			parentNode.children[index] = newNode
 			return
 		}
 	}
+	// New node needs to be inserted but there's
+	// already an existing node (down) in the way.
+	// Calculate common prefix length.
 	common := commonBits(down.addr, ip)
 	cidr = min(cidr, common)
 	next := parentNode
+	// check if new node can be the parent of `down` node
 	if newNode.cidr == cidr {
 		index := newNode.childIndex(down.addr)
 		down.parent = parent{&newNode.children[index], index}
@@ -221,28 +228,29 @@ func (p parent) insert(ip []byte, cidr uint8, peer *Peer) {
 		}
 		return
 	}
-	// intermediate node?
-	nd := &node{
+	// common node which will contain both new node and down node
+	// which was in the way
+	commonNode := &node{
 		cidr:  cidr,
 		index: cidr / 8,
 		shift: 7 - (cidr % 8),
 		// copy slice
 		addr: append([]byte{}, newNode.addr...),
 	}
-	nd.maskSelf()
-	index := nd.childIndex(down.addr)
-	down.parent = parent{&nd.children[index], index}
-	nd.children[index] = down
-	index = nd.childIndex(newNode.addr)
-	newNode.parent = parent{&nd.children[index], index}
-	nd.children[index] = newNode
+	commonNode.maskSelf()
+	index := commonNode.childIndex(down.addr)
+	down.parent = parent{&commonNode.children[index], index}
+	commonNode.children[index] = down
+	index = commonNode.childIndex(newNode.addr)
+	newNode.parent = parent{&commonNode.children[index], index}
+	commonNode.children[index] = newNode
 	if next == nil {
-		nd.parent = p
-		*p.child = nd
+		commonNode.parent = p
+		*p.child = commonNode
 	} else {
-		index := next.childIndex(nd.addr)
-		nd.parent = parent{&next.children[index], index}
-		next.children[index] = nd
+		index := next.childIndex(commonNode.addr)
+		commonNode.parent = parent{&next.children[index], index}
+		next.children[index] = commonNode
 	}
 }
 
