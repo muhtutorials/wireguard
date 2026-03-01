@@ -383,51 +383,51 @@ func (n *node) find(ip []byte) *Peer {
 	return peer
 }
 
-type AllowedIPs struct {
+type Router struct {
 	IPv4 *node
 	IPv6 *node
 	mu   sync.RWMutex
 }
 
-func (ips *AllowedIPs) Insert(prefix netip.Prefix, peer *Peer) {
-	ips.mu.Lock()
-	defer ips.mu.Unlock()
+func (r *Router) Insert(prefix netip.Prefix, peer *Peer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	// `parent.childIndex = 2` signifies the root of the trie
 	if prefix.Addr().Is4() {
 		ip := prefix.Addr().As4()
-		parent{&ips.IPv4, 2}.insert(ip[:], uint8(prefix.Bits()), peer)
+		parent{&r.IPv4, 2}.insert(ip[:], uint8(prefix.Bits()), peer)
 	} else if prefix.Addr().Is6() {
 		ip := prefix.Addr().As16()
-		parent{&ips.IPv6, 2}.insert(ip[:], uint8(prefix.Bits()), peer)
+		parent{&r.IPv6, 2}.insert(ip[:], uint8(prefix.Bits()), peer)
 	} else {
 		panic(errors.New("inserting unknown address type"))
 	}
 }
 
-func (ips *AllowedIPs) Find(ip []byte) *Peer {
-	ips.mu.RLock()
-	defer ips.mu.RUnlock()
+func (r *Router) Find(ip []byte) *Peer {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	switch len(ip) {
 	case net.IPv4len:
-		return ips.IPv4.find(ip)
+		return r.IPv4.find(ip)
 	case net.IPv6len:
-		return ips.IPv6.find(ip)
+		return r.IPv6.find(ip)
 	default:
 		panic(errors.New("looking up unknown address type"))
 	}
 }
 
-func (ips *AllowedIPs) Remove(prefix netip.Prefix, peer *Peer) {
-	ips.mu.Lock()
-	defer ips.mu.Unlock()
+func (r *Router) Remove(prefix netip.Prefix, peer *Peer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	var n *node
 	var exact bool
 	if prefix.Addr().Is4() {
 		ip := prefix.Addr().As4()
-		n, exact = ips.IPv4.nodePlacement(ip[:], uint8(prefix.Bits()))
+		n, exact = r.IPv4.nodePlacement(ip[:], uint8(prefix.Bits()))
 	} else if prefix.Addr().Is6() {
 		ip := prefix.Addr().As16()
-		n, exact = ips.IPv6.nodePlacement(ip[:], uint8(prefix.Bits()))
+		n, exact = r.IPv6.nodePlacement(ip[:], uint8(prefix.Bits()))
 	} else {
 		panic(errors.New("removing unknown address type"))
 	}
@@ -437,9 +437,9 @@ func (ips *AllowedIPs) Remove(prefix netip.Prefix, peer *Peer) {
 	n.remove()
 }
 
-func (ips *AllowedIPs) RemoveByPeer(peer *Peer) {
-	ips.mu.Lock()
-	defer ips.mu.Unlock()
+func (r *Router) RemoveByPeer(peer *Peer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	var next *list.Element
 	for elem := peer.nodes.Front(); elem != nil; elem = next {
 		// Save the next element, because the current element's
@@ -449,9 +449,9 @@ func (ips *AllowedIPs) RemoveByPeer(peer *Peer) {
 	}
 }
 
-func (ips *AllowedIPs) PeerNodes(peer *Peer, cb func(prefix netip.Prefix) bool) {
-	ips.mu.RLock()
-	defer ips.mu.RUnlock()
+func (r *Router) PeerNodes(peer *Peer, cb func(prefix netip.Prefix) bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	for elem := peer.nodes.Front(); elem != nil; elem = elem.Next() {
 		n := elem.Value.(*node)
 		addr, _ := netip.AddrFromSlice(n.addr)

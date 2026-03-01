@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	QuSize          = conn.BatchSize
+	QuStagedSize    = conn.BatchSize
 	QuOutSize       = 1024
 	QuInSize        = 1024
 	QuHandshakeSize = 1024
@@ -103,10 +103,10 @@ func (d *Device) flushQuOut(q *quOutFlush) {
 		case quOutItems := <-q.c:
 			quOutItems.Lock()
 			for _, item := range quOutItems.items {
-				d.PutMsgBuf(item.buf)
+				d.PutMessageBuf(item.buf)
 				d.PutOutItem(item)
 			}
-			d.putQuOutItems(quOutItems)
+			d.PutOutItemsSynced(quOutItems)
 		default:
 			return
 		}
@@ -135,10 +135,10 @@ func (d *Device) flushQuIn(q *quInFlush) {
 		case quInItems := <-q.c:
 			quInItems.Lock()
 			for _, item := range quInItems.items {
-				d.PutMsgBuf(item.buf)
+				d.PutMessageBuf(item.buf)
 				d.PutInItem(item)
 			}
-			d.PutQuInItems(quInItems)
+			d.PutInItemsSynced(quInItems)
 		default:
 			return
 		}

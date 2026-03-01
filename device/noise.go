@@ -556,11 +556,11 @@ func (peer *Peer) BeginSymmetricSession() error {
 	} else {
 		return fmt.Errorf("invalid state for keypair derivation: %v", hs.state)
 	}
-	// zero handshake
-	setZero(hs.chainKey[:])
 	// Doesn't necessarily need to be zeroed.
 	// Could be used for something interesting down the line.
 	setZero(hs.hash[:])
+	// zero handshake
+	setZero(hs.chainKey[:])
 	setZero(hs.localEphemeral[:])
 	peer.handshake.state = handshakeZeroed
 	// create AEAD instances
@@ -569,7 +569,7 @@ func (peer *Peer) BeginSymmetricSession() error {
 	keypair.receive, _ = chacha20poly1305.New(recvKey[:])
 	setZero(sendKey[:])
 	setZero(recvKey[:])
-	keypair.created = time.Now()
+	keypair.createdAt = time.Now()
 	keypair.replayFilter.Reset()
 	keypair.isInitiator = isInitiator
 	keypair.localIndex = peer.handshake.localIndex
@@ -603,20 +603,20 @@ func (peer *Peer) BeginSymmetricSession() error {
 	return nil
 }
 
-func (peer *Peer) ReceivedWithKeypair(receivedKeypair *Keypair) bool {
-	kp := &peer.keypairs
-	if kp.next.Load() != receivedKeypair {
+func (peer *Peer) ReceivedWithKeypair(rcvdKP *Keypair) bool {
+	kps := &peer.keypairs
+	if kps.next.Load() != rcvdKP {
 		return false
 	}
-	kp.Lock()
-	defer kp.Unlock()
-	if kp.next.Load() != receivedKeypair {
+	kps.Lock()
+	defer kps.Unlock()
+	if kps.next.Load() != rcvdKP {
 		return false
 	}
-	old := kp.previous
-	kp.previous = kp.current
-	peer.device.DeleteKeypair(old)
-	kp.current = kp.next.Load()
-	kp.next.Store(nil)
+	prev := kps.previous
+	kps.previous = kps.current
+	peer.device.DeleteKeypair(prev)
+	kps.current = kps.next.Load()
+	kps.next.Store(nil)
 	return true
 }

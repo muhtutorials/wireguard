@@ -20,18 +20,26 @@ type Keypair struct {
 	sendNonce    atomic.Uint64
 	send         cipher.AEAD
 	receive      cipher.AEAD
-	replayFilter replay.Filter
-	isInitiator  bool
-	created      time.Time
 	localIndex   uint32
 	remoteIndex  uint32
+	isInitiator  bool
+	replayFilter replay.Filter
+	createdAt    time.Time
 }
 
 type Keypairs struct {
-	sync.RWMutex
-	current  *Keypair
+	// sync.RWMutex protects the relationship between current and
+	// previous (you can't have both change independently), while
+	// next is an independent value that can be set atomically
+	// without affecting the current/previous relationship.
+	//
+	// currently used keypair
+	current *Keypair
+	// previous keypair (allows for delayed packets)
 	previous *Keypair
-	next     atomic.Pointer[Keypair]
+	// next keypair (used during handshake)
+	next atomic.Pointer[Keypair]
+	sync.RWMutex
 }
 
 func (k *Keypairs) Current() *Keypair {

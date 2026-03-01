@@ -41,7 +41,7 @@ type QuOutItemsSynced struct {
 
 func (d *Device) NewQuOutItem() *QuOutItem {
 	item := d.GetOutItem()
-	item.buf = d.GetMsgBuf()
+	item.buf = d.GetMessageBuf()
 	item.nonce = 0
 	// keypair and peer were zeroed out (if necessary) by zeroOutPointers
 	return item
@@ -56,4 +56,37 @@ func (i *QuOutItem) zeroOutPointers() {
 	i.packet = nil
 	i.keypair = nil
 	i.peer = nil
+}
+
+// Queues a keepalive if no packets are queued for peer.
+func (peer *Peer) SendKeepalive() {
+	if len(peer.qus.staged) == 0 && peer.isRunning.Load() {
+		item := peer.device.NewQuOutItem()
+		outItemsSynced := peer.device.GetOutItemsSynced()
+		outItemsSynced.items = append(outItemsSynced.items, item)
+		select {
+		case peer.qus.staged <- outItemsSynced:
+			peer.device.log.Verbosef("%v - Sending keepalive packet", peer)
+		default:
+			peer.device.PutMessageBuf(item.buf)
+			peer.device.PutOutItem(item)
+			peer.device.PutOutItemsSynced(outItemsSynced)
+		}
+	}
+	peer.SendStagedPackets()
+}
+
+func (peer *Peer) FlushStagedPackets() {
+	for {
+		select {
+		case quOutItemsSynced := <-peer.qus.staged:
+			for _, item := range quOutItemsSynced.items {
+				peer.device.PutMessageBuf(item.buf)
+				peer.device.PutOutItem(item)
+			}
+			peer.device.PutOutItemsSynced(quOutItemsSynced)
+		default:
+			return
+		}
+	}
 }

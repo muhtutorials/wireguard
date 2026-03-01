@@ -56,7 +56,7 @@ func (d *Device) PopulatePools() {
 	d.pools.inItems = NewWaitPool(PreallocatedBufsPerPool, func() any {
 		return new(QuInItem)
 	})
-	d.pools.msgBufs = NewWaitPool(PreallocatedBufsPerPool, func() any {
+	d.pools.messageBufs = NewWaitPool(PreallocatedBufsPerPool, func() any {
 		return new([MaxMessageSize]byte)
 	})
 }
@@ -102,15 +102,15 @@ func (d *Device) GetInItem() *QuInItem {
 	return d.pools.inItems.Get().(*QuInItem)
 }
 
-func (d *Device) PutInboundElement(item *QuInItem) {
+func (d *Device) PutInItem(item *QuInItem) {
 	item.zeroOutPointers()
 	d.pools.inItems.Put(item)
 }
 
-func (d *Device) GetMsgBuf() *[MaxMessageSize]byte {
-	return d.pools.msgBufs.Get().(*[MaxMessageSize]byte)
+func (d *Device) GetMessageBuf() *[MaxMessageSize]byte {
+	return d.pools.messageBufs.Get().(*[MaxMessageSize]byte)
 }
 
-func (d *Device) PutMsgBuf(msg *[MaxMessageSize]byte) {
-	d.pools.msgBufs.Put(msg)
+func (d *Device) PutMessageBuf(msg *[MaxMessageSize]byte) {
+	d.pools.messageBufs.Put(msg)
 }

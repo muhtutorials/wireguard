@@ -20,7 +20,7 @@ const (
 	cleanupInterval = time.Second
 )
 
-type Ratelimiter struct {
+type RateLimiter struct {
 	table       map[netip.Addr]*Entry
 	now         func() time.Time // returns the current local time
 	stopOrReset chan struct{}    // send to reset, close to stop
@@ -33,7 +33,7 @@ type Entry struct {
 	mu       sync.Mutex
 }
 
-func (r *Ratelimiter) Init() {
+func (r *RateLimiter) Init() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.table = make(map[netip.Addr]*Entry)
@@ -67,7 +67,7 @@ func (r *Ratelimiter) Init() {
 	}()
 }
 
-func (r *Ratelimiter) cleanup() (empty bool) {
+func (r *RateLimiter) cleanup() (empty bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for k, v := range r.table {
@@ -80,7 +80,7 @@ func (r *Ratelimiter) cleanup() (empty bool) {
 	return len(r.table) == 0
 }
 
-func (r *Ratelimiter) Allow(ip netip.Addr) bool {
+func (r *RateLimiter) Allow(ip netip.Addr) bool {
 	// lookup entry
 	// TODO: race condition
 	r.mu.RLock()
@@ -118,7 +118,7 @@ func (r *Ratelimiter) Allow(ip netip.Addr) bool {
 	return false
 }
 
-func (r *Ratelimiter) Close() {
+func (r *RateLimiter) Close() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.stopOrReset != nil {
