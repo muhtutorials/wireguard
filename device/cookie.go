@@ -1,0 +1,299 @@
+// A "cookie" is a key component of Denial-of-Service (DoS)
+// protection mechanism. It's a temporary, lightweight token
+// used to verify that a client is reachable at the IP
+// address it claims to be using, without requiring expensive
+// cryptographic operations for every single connection attempt.
+//
+// The main goal of the cookie mechanism is to prevent CPU
+// and memory exhaustion attacks. A standard WireGuard handshake
+// involves expensive public key cryptography. If an attacker
+// could send thousands of fake handshake initiations with
+// spoofed source IP addresses, the target machine would waste
+// all its resources trying to process them,
+// effectively causing a denial of service.
+//
+// The cookie mechanism adds a two-step verification process
+// for the handshake, involving two Message Authentication
+// Codes (MACs): mac1 and mac2. These are attached to the
+// end of handshake packets.
+//
+// Step 1: The First Message (mac1)
+//
+//	When a client sends its very first handshake initiation
+//	packet, it must include a mac1.
+//	The mac1 is a static MAC computed from the entire packet
+//	using a secret key that is derived from the server's
+//	static public key.
+//	It serves as a persistent, weak, identifier.
+//	It proves that the client knows the server's public key.
+//	However, it's not enough to prevent DoS attacks because
+//	an attacker can pre-compute this for many packets.
+//
+// Step 2: The Server's Dilemma and the Cookie Response
+//
+//	Upon receiving an initiation packet the server first checks
+//	the mac1. If it's invalid, the packet is silently dropped.
+//	If the mac1 is valid, the server checks if it's currently
+//	under high load or if it suspects a DoS attack (this is
+//	handled by the ratelimiter).
+//	If under load, the server does not proceed with the expensive
+//	handshake. Instead, it responds with a special cookie
+//	reply message.
+//	This reply contains a cookie. The cookie is generated
+//	by the server using a secret that changes every two
+//	minutes and is a function of the client's real IP address
+//	and port.
+//	Importantly, the server doesn't need to remember that it
+//	sent this cookie. It can regenerate and verify it later
+//	because it's based on its own rotating secret and the
+//	client's address.
+//
+// Step 3: The Second Message (mac2)
+//
+//	The client must now resend its handshake initiation packet,
+//	but this time it must include a mac2 in addition to the mac1.
+//	The mac2 is another MAC computed over the packet, but this
+//	time using the cookie received from the server as the key.
+//	The server receives the retried packet. It uses the client's
+//	IP address and port to regenerate the same cookie. It then
+//	uses this regenerated cookie to verify the mac2.
+//	If the mac2 is valid, the server knows with a high
+//	degree of certainty that the client is genuinely reachable
+//	at the claimed IP address (because the client had to
+//	receive the cookie at that address to calculate mac2).
+//	Only then will the server proceed with the expensive
+//	full handshake.
+package device
+
+import (
+	"crypto/hmac"
+	"crypto/rand"
+	"sync"
+	"time"
+
+	"golang.org/x/crypto/blake2s"
+	"golang.org/x/crypto/chacha20poly1305"
+)
+
+type CookieChecker struct {
+	mac1 struct {
+		key [blake2s.Size]byte
+	}
+	mac2 struct {
+		secret        [blake2s.Size]byte
+		secretSetAt   time.Time
+		encryptionKey [chacha20poly1305.KeySize]byte
+	}
+	sync.RWMutex
+}
+
+func (cc *CookieChecker) Init(pk NoisePublicKey) {
+	cc.Lock()
+	defer cc.Unlock()
+	// mac1 state
+	hash, _ := blake2s.New256(nil)
+	hash.Write([]byte(WGLabelMAC1))
+	hash.Write(pk[:])
+	hash.Sum(cc.mac1.key[:0])
+	hash.Reset()
+	// mac2 state
+	hash.Write([]byte(WGLabelCookie))
+	hash.Write(pk[:])
+	hash.Sum(cc.mac2.encryptionKey[:0])
+}
+
+func (cc *CookieChecker) CheckMAC1(msg []byte) bool {
+	cc.RLock()
+	defer cc.RUnlock()
+	size := len(msg)
+	mac2Start := size - blake2s.Size128
+	mac1Start := mac2Start - blake2s.Size128
+	var mac1 [blake2s.Size128]byte
+	// blake2s.New128(key) used for MAC. Key is required.
+	// Only a holder of the key can reproduce the hash.
+	//
+	// key := []byte("super-secret-key")  // known only to Alice and Bob
+	// Alice computes MAC
+	// mac, _ := blake2s.New256(key)
+	// mac.Write([]byte("Transfer $100 to Bob"))
+	// aliceTag := mac.Sum(nil)  // 0xa4f7c2b8...
+	// Bob verifies with same key
+	// verifier, _ := blake2s.New256(key)
+	// verifier.Write([]byte("Transfer $100 to Bob"))
+	// bobTag := verifier.Sum(nil)
+	// if subtle.ConstantTimeCompare(aliceTag, bobTag) == 1 {
+	//     Message is authentic!
+	// }
+	mac, _ := blake2s.New128(cc.mac1.key[:])
+	mac.Write(msg[:mac1Start])
+	mac.Sum(mac1[:0])
+	return hmac.Equal(mac1[:], msg[mac1Start:mac2Start])
+}
+
+func (cc *CookieChecker) CheckMAC2(msg, srcAddr []byte) bool {
+	cc.RLock()
+	defer cc.RUnlock()
+	if time.Since(cc.mac2.secretSetAt) > CookieRefreshTime {
+		return false
+	}
+	// derive cookie key
+	var cookie [blake2s.Size128]byte
+	func() {
+		mac, _ := blake2s.New128(cc.mac2.secret[:])
+		// srcAddr is IP address and port number
+		mac.Write(srcAddr)
+		mac.Sum(cookie[:0])
+	}()
+	// calculate mac of packet (including mac1)
+	mac2Start := len(msg) - blake2s.Size128
+	var mac2 [blake2s.Size128]byte
+	func() {
+		mac, _ := blake2s.New128(cookie[:])
+		mac.Write(msg[:mac2Start])
+		mac.Sum(mac2[:0])
+	}()
+	return hmac.Equal(mac2[:], msg[mac2Start:])
+}
+
+// CreateReply creates the cookie reply message.
+// It's called when:
+//   - A handshake message is received without a valid cookie.
+//   - The receiver wants to challenge the sender to prove
+//     they can receive traffic at the claimed source IP.
+func (cc *CookieChecker) CreateReply(
+	msg []byte,
+	receiver uint32,
+	srcAddr []byte,
+) (*MessageCookieReply, error) {
+	cc.RLock()
+	defer cc.RUnlock()
+	// refresh cookie secret
+	if time.Since(cc.mac2.secretSetAt) > CookieRefreshTime {
+		cc.RUnlock()
+		cc.Lock()
+		_, err := rand.Read(cc.mac2.secret[:])
+		if err != nil {
+			cc.Unlock()
+			return nil, err
+		}
+		cc.mac2.secretSetAt = time.Now()
+		cc.Unlock()
+		cc.RLock()
+	}
+	// derive cookie
+	var cookie [blake2s.Size128]byte
+	// The mac holds sensitive data (the secret key).
+	// By putting it in an anonymous function that
+	// immediately executes and returns, the mac
+	// variable goes out of scope right after use,
+	// making it eligible for garbage collection sooner.
+	func() {
+		mac, _ := blake2s.New128(cc.mac2.secret[:])
+		mac.Write(srcAddr)
+		mac.Sum(cookie[:0])
+		mac.Reset()
+	}()
+	// encrypt cookie
+	size := len(msg)
+	mac2Start := size - blake2s.Size128
+	mac1Start := mac2Start - blake2s.Size128
+	var reply *MessageCookieReply
+	reply.Type = MessageCookieReplyType
+	// Identifies which cryptographic session this packet belongs to.
+	// It contains the index of the recipient's current sending key.
+	// It tells the receiver: "Use the private key associated
+	// with this index to decrypt the payload of this message."
+	// During the handshake, peers exchange and store
+	// each other's public keys and assign them an index.
+	// This index is a much smaller and more efficient way
+	// to reference the correct key for a session than sending
+	// the full public key with every data packet.
+	reply.Receiver = receiver
+	_, err := rand.Read(reply.Nonce[:])
+	if err != nil {
+		return nil, err
+	}
+	xchapoly, _ := chacha20poly1305.NewX(cc.mac2.encryptionKey[:])
+	xchapoly.Seal(reply.Cookie[:0], reply.Nonce[:], cookie[:], msg[mac1Start:mac2Start])
+	return reply, nil
+}
+
+type CookieGenerator struct {
+	mac1 struct {
+		key [blake2s.Size]byte
+	}
+	mac2 struct {
+		cookie        [blake2s.Size128]byte
+		cookieSetAt   time.Time
+		hasLastMAC1   bool
+		lastMAC1      [blake2s.Size128]byte
+		encryptionKey [chacha20poly1305.KeySize]byte
+	}
+	sync.RWMutex
+}
+
+func (cg *CookieGenerator) Init(pk NoisePublicKey) {
+	cg.Lock()
+	defer cg.Unlock()
+	// mac1 state
+	hash, _ := blake2s.New256(nil)
+	hash.Write([]byte(WGLabelMAC1))
+	hash.Write(pk[:])
+	hash.Sum(cg.mac1.key[:0])
+	hash.Reset()
+	// mac2 state
+	hash.Write([]byte(WGLabelCookie))
+	hash.Write(pk[:])
+	hash.Sum(cg.mac2.encryptionKey[:0])
+}
+
+// ConsumeReply consumes/processes the cookie reply.
+// It's called when:
+//   - A peer receives a MessageCookieReply in response to
+//     a previously sent message.
+//   - It validates the cookie and stores it for future use.
+func (cg *CookieGenerator) ConsumeReply(msg *MessageCookieReply) bool {
+	cg.Lock()
+	defer cg.Unlock()
+	if !cg.mac2.hasLastMAC1 {
+		return false
+	}
+	var cookie [blake2s.Size128]byte
+	xchapoly, _ := chacha20poly1305.NewX(cg.mac2.encryptionKey[:])
+	_, err := xchapoly.Open(cookie[:0], msg.Nonce[:], msg.Cookie[:], cg.mac2.lastMAC1[:])
+	if err != nil {
+		return false
+	}
+	cg.mac2.cookie = cookie
+	cg.mac2.cookieSetAt = time.Now()
+	return true
+}
+
+// AddMacs adds Macs to msg.
+func (cg *CookieGenerator) AddMacs(msg []byte) {
+	size := len(msg)
+	mac2Start := size - blake2s.Size128
+	mac1Start := mac2Start - blake2s.Size128
+	// mac.Sum() adds MACs to these two slices which are part of msg
+	mac1 := msg[mac1Start:mac2Start]
+	mac2 := msg[mac2Start:]
+	cg.Lock()
+	defer cg.Unlock()
+	// set mac1
+	func() {
+		mac, _ := blake2s.New128(cg.mac1.key[:])
+		mac.Write(msg[:mac1Start])
+		mac.Sum(mac1[:0])
+	}()
+	copy(cg.mac2.lastMAC1[:], mac1)
+	cg.mac2.hasLastMAC1 = true
+	// set mac2
+	if time.Since(cg.mac2.cookieSetAt) > CookieRefreshTime {
+		return
+	}
+	func() {
+		mac, _ := blake2s.New128(cg.mac2.cookie[:])
+		mac.Write(msg[:mac2Start])
+		mac.Sum(mac2[:0])
+	}()
+}

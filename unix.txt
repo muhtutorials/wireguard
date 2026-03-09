@@ -164,9 +164,10 @@ Description: size of netlink message header.
 
 NlMsghdr
 Description: netlink message header.
+Every netlink message, whether it's a request to the kernel or a response from it, must begin with this header
 Usage:
 type NlMsghdr struct {
-	Len   uint32
+	Len   uint32 // SizeofNlMsghdr + payload
 	Type  uint16
 	Flags uint16
 	Seq   uint32
@@ -526,3 +527,52 @@ SO_MARK
 Description: socket option mark. Sets a firewall mark on the socket.
 All packets sent through this socket will be tagged with the specified mark.
 Used for policy routing, packet filtering, etc.
+
+RTMGRP_IPV4_ROUTE
+Description: multicast group constant used for routing sockets.
+Whenever the system's IPv4 routing table changes (e.g., a route is added, deleted, or modified), the kernel broadcasts a message through the RTMGRP_IPV4_ROUTE multicast channel. Any user-space program subscribed to this group can receive these updates in real-time, avoiding the need for inefficient polling of the routing table.
+Usage:
+	addr := &unix.SockaddrNetlink{
+		Family: unix.AF_NETLINK,
+		Groups: unix.RTMGRP_IPV4_ROUTE,
+	}
+
+RtMsg
+Description: route message header.
+While NlMsghdr is the generic envelope for all netlink messages, RtMsg is the route-specific header that follows it when you're manipulating the routing table.
+If NlMsghdr is the envelope telling the kernel "this is a routing message", then RtMsg is the actual form inside specifying which route you're talking about.
+
+RtAttr
+Description: route attribute header.
+It's used to add optional or variable-length data to a route message.
+While RtMsg contains the fixed, mandatory fields of a route, RtAttr is used to attach additional information like the actual IP addresses, metrics, or other route parameters.
+
+RTM_NEWROUTE
+Description: netlink message type constant that tells the kernel to create or update a route in the routing table.
+
+RTM_DELROUTE
+Description: netlink message type constant that tells the kernel to delete a route in the routing table.
+
+SizeofRtMsg
+Description: constant that represents the fixed size in bytes of struct rtmsg (the route message header) in memory.
+
+SizeofRtAttr
+Description: constant that represents the fixed size in bytes of a routing attribute header (struct rtattr).
+
+RTA_OIF
+Description: routing attribute constant that stands for "Output Interface Index" (sometimes also called "Outgoing Interface Index"). It specifies the network interface through which packets should be sent when using a particular route.
+
+RTM_GETROUTE
+Description: netlink message type constant used to request route information from the kernel.
+
+NLM_F_REQUEST
+Description: flag constant used in the Flags field of a netlink message header (unix.NlMsghdr). It tells the kernel: "This message requires a response."
+
+RTA_DST
+Description: destination address.
+
+RTA_SRC
+Description: source address (for policy routing or IPv6 source-destination routing).
+
+RTA_MARK
+Description: firewall mark value (for policy routing based on packet marks).

@@ -127,7 +127,7 @@ func (tun *Tun) routineNetlinkListener() {
 		var err error
 		for {
 			n, _, _, _, err = unix.Recvmsg(tun.netlinkSock, msg[:], nil, 0)
-			if err == nil || !rwcancel.RetryAfterError(err) {
+			if err == nil || !rwcancel.RetriableError(err) {
 				break
 			}
 			if !tun.netlinkCancel.ReadyRead() {

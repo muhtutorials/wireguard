@@ -31,7 +31,7 @@ type Peer struct {
 type endpoint struct {
 	val conn.Endpoint
 	// Signal to val.ClearSrc() prior to next packet transmission.
-	// clearSrcOnTx indicates that the source address
+	// When true clearSrcOnTx indicates that the source address
 	// should NOT be cleared when transmitting.
 	clearSrcOnTx bool
 	// disableRoaming prevents the peer from changing IP addresses

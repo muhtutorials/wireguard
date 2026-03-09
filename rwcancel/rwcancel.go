@@ -22,7 +22,7 @@ func New(fd int) (*RWCancel, error) {
 	// data := make([]byte, 1024)
 	// n, err := syscall.Read(fd, data)  // hangs here if no data
 	//
-	// Non-blocking I/O
+	// Non-blocking I/O:
 	// read() returns IMMEDIATELY, even if no data
 	// n, err := syscall.Read(fd, data)
 	// if err != nil && err == syscall.EAGAIN {
@@ -41,8 +41,7 @@ func New(fd int) (*RWCancel, error) {
 	return rw, nil
 }
 
-// RetryAfterError checks if error is retryable
-func RetryAfterError(err error) bool {
+func RetriableError(err error) bool {
 	// EAGAIN: resource temporarily unavailable
 	// EINTR: interrupted system call
 	return errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR)
@@ -70,7 +69,7 @@ func (rw *RWCancel) ReadyRead() bool {
 	var err error
 	for {
 		_, err = unix.Poll(pollFds, -1) // -1 = wait forever
-		if err == nil || !RetryAfterError(err) {
+		if err == nil || !RetriableError(err) {
 			break
 		}
 	}
@@ -81,9 +80,13 @@ func (rw *RWCancel) ReadyRead() bool {
 	// if pfd.Revents & POLLIN != 0 { // "&" is used if several events are monitored
 	//     socket has data to read
 	// }
+	// If a POLLIN event was sent on closeFd, it's the signal that
+	// we should not proceed with reading from the rw.fd.
 	if pollFds[1].Revents != 0 {
 		return false
 	}
+	// If a POLLIN event was sent on rw.fd, it's the signal that
+	// we can proceed with reading from the rw.fd.
 	return pollFds[0].Revents != 0
 }
 
@@ -103,23 +106,27 @@ func (rw *RWCancel) ReadyWrite() bool {
 	var err error
 	for {
 		_, err = unix.Poll(pollFds, -1)
-		if err == nil || !RetryAfterError(err) {
+		if err == nil || !RetriableError(err) {
 			break
 		}
 	}
 	if err != nil {
 		return false
 	}
+	// If a POLLIN event was sent on closeFd, it's the signal that
+	// we should not proceed with writing to the rw.fd.
 	if pollFds[1].Revents != 0 {
 		return false
 	}
+	// If a POLLOUT event was sent on rw.fd, it's the signal that
+	// we can proceed with writing from the rw.fd.
 	return pollFds[0].Revents != 0
 }
 
 func (rw *RWCancel) Read(p []byte) (int, error) {
 	for {
 		n, err := unix.Read(rw.fd, p)
-		if err == nil || !RetryAfterError(err) {
+		if err == nil || !RetriableError(err) {
 			return n, err
 		}
 		if !rw.ReadyRead() {
@@ -131,7 +138,7 @@ func (rw *RWCancel) Read(p []byte) (int, error) {
 func (rw *RWCancel) Write(p []byte) (int, error) {
 	for {
 		n, err := unix.Write(rw.fd, p)
-		if err == nil || !RetryAfterError(err) {
+		if err == nil || !RetriableError(err) {
 			return n, err
 		}
 		if !rw.ReadyWrite() {
