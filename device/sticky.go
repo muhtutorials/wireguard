@@ -64,19 +64,41 @@ type peerEndpoint struct {
 
 type peerEndpointMap map[uint32]peerEndpoint
 
+// netlinkMsg is used by the Linux kernel's WireGuard module to
+// communicate configuration details (like interface addresses,
+// routes, and routing marks) between user space and kernel space.
 type netlinkMsg struct {
-	hdr     unix.NlMsghdr
-	msg     unix.RtMsg
-	dsthdr  unix.RtAttr
-	dst     [4]byte
-	srchdr  unix.RtAttr
-	src     [4]byte
+	// The standard Netlink message header. It contains fields like
+	// message length and type, which are essential for the kernel
+	// to parse the rest of the message.
+	hdr unix.NlMsghdr
+	// The main routing message header. This struct holds the core
+	// information for a routing-related Netlink request,
+	// such as the address family (e.g., IPv4), the route's scope,
+	// and the routing table ID.
+	msg unix.RtMsg
+	// A header for a Netlink attribute that describes
+	// the destination address.
+	dsthdr unix.RtAttr
+	// The actual destination IPv4 address.
+	dst [4]byte
+	// A header for a Netlink attribute that describes
+	// the source address.
+	srchdr unix.RtAttr
+	// The actual source IPv4 address.
+	src [4]byte
+	// A header for a Netlink attribute that describes
+	// the routing mark (fwmark).
 	markhdr unix.RtAttr
-	mark    uint32
+	// The actual 32-bit routing mark value. This is used for
+	// policy routing, allowing the system to make routing
+	// decisions based on this mark.
+	mark uint32
 }
 
 // routineRouteListener monitors network routing changes and updates
 // peer endpoints with the correct source interface index.
+// Implemented only for IPv4.
 //
 // Example Scenario
 // Initial state: Peer endpoint uses interface eth0 (ifidx=2).
@@ -92,8 +114,8 @@ func (d *Device) routineRouteListener(
 ) {
 	defer unix.Close(netlinkSock)
 	defer netlinkCancel.Close()
-	var reqPeer peerEndpointMap
-	var reqPeerMu sync.Mutex
+	var peerEndpoints peerEndpointMap
+	var peerEndpointsMu sync.Mutex
 	msg := make([]byte, 1<<16) // 65536 bytes
 	for {
 		var n int
@@ -142,18 +164,20 @@ func (d *Device) routineRouteListener(
 							// RTA_OIF is output interface index.
 							if rtAttrHdr.Type == unix.RTA_OIF && rtAttrHdr.Len == unix.SizeofRtAttr+4 {
 								ifidx := *(*uint32)(unsafe.Pointer(&rtAttrSlice[unix.SizeofRtAttr]))
-								reqPeerMu.Lock()
-								if reqPeer == nil {
-									reqPeerMu.Unlock()
+								peerEndpointsMu.Lock()
+								if peerEndpoints == nil {
+									peerEndpointsMu.Unlock()
 									break
 								}
-								pe, ok := reqPeer[hdr.Seq]
-								reqPeerMu.Unlock()
+								pe, ok := peerEndpoints[hdr.Seq]
+								peerEndpointsMu.Unlock()
 								if !ok {
 									break
 								}
 								pe.peer.endpoint.Lock()
+								// compare memory addresses to check if the endpoint is still the same one we queried
 								if &pe.peer.endpoint.val != pe.endpoint {
+									// endpoint changed (stale response)
 									pe.peer.endpoint.Unlock()
 									break
 								}
@@ -169,11 +193,12 @@ func (d *Device) routineRouteListener(
 					}
 					break
 				}
-				reqPeerMu.Lock()
-				reqPeer = make(peerEndpointMap)
-				reqPeerMu.Unlock()
+				peerEndpointsMu.Lock()
+				peerEndpoints = make(peerEndpointMap)
+				peerEndpointsMu.Unlock()
 				go func() {
 					d.peers.RLock()
+					defer d.peers.RUnlock()
 					var i uint32 = 1
 					for _, peer := range d.peers.val {
 						peer.endpoint.Lock()
@@ -181,49 +206,50 @@ func (d *Device) routineRouteListener(
 							peer.endpoint.Unlock()
 							continue
 						}
-						nativeEP, _ := peer.endpoint.val.(*conn.NetEndpoint)
-						if nativeEP == nil {
+						nativeEndpoint, _ := peer.endpoint.val.(*conn.NetEndpoint)
+						if nativeEndpoint == nil {
 							peer.endpoint.Unlock()
 							continue
 						}
-						if nativeEP.DstIP().Is6() || nativeEP.SrcIfidx() == 0 {
+						if nativeEndpoint.DstIP().Is6() || nativeEndpoint.SrcIfidx() == 0 {
 							peer.endpoint.Unlock()
 							break
 						}
 						nlmsg := netlinkMsg{
-							unix.NlMsghdr{
+							hdr: unix.NlMsghdr{
 								Type:  uint16(unix.RTM_GETROUTE),
 								Flags: unix.NLM_F_REQUEST,
 								Seq:   i,
 							},
-							unix.RtMsg{
+							msg: unix.RtMsg{
 								Family:  unix.AF_INET,
 								Dst_len: 32,
 								Src_len: 32,
 							},
-							unix.RtAttr{
+							dsthdr: unix.RtAttr{
 								Len:  8,
 								Type: unix.RTA_DST,
 							},
-							nativeEP.DstIP().As4(),
-							unix.RtAttr{
+							dst: nativeEndpoint.DstIP().As4(),
+							srchdr: unix.RtAttr{
 								Len:  8,
 								Type: unix.RTA_SRC,
 							},
-							nativeEP.SrcIP().As4(),
-							unix.RtAttr{
+							src: nativeEndpoint.SrcIP().As4(),
+							markhdr: unix.RtAttr{
 								Len:  8,
 								Type: unix.RTA_MARK,
 							},
-							d.net.fwmark,
+							mark: d.net.fwmark,
 						}
 						nlmsg.hdr.Len = uint32(unsafe.Sizeof(nlmsg))
-						reqPeerMu.Lock()
-						reqPeer[i] = peerEndpoint{
-							peer:     peer,
+						peerEndpointsMu.Lock()
+						peerEndpoints[i] = peerEndpoint{
+							peer: peer,
+							// captures the specific endpoint value, not just current one
 							endpoint: &peer.endpoint.val,
 						}
-						reqPeerMu.Unlock()
+						peerEndpointsMu.Unlock()
 						peer.endpoint.Unlock()
 						i++
 						_, err := netlinkCancel.Write((*[unsafe.Sizeof(nlmsg)]byte)(unsafe.Pointer(&nlmsg))[:])
@@ -231,7 +257,6 @@ func (d *Device) routineRouteListener(
 							break
 						}
 					}
-					d.peers.RUnlock()
 				}()
 			}
 			remainder = remainder[hdr.Len:]
