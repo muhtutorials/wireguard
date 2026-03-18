@@ -27,13 +27,13 @@ const (
 // call wg.Done() to remove the initial reference.
 // When the ref-count hits 0, the queue's channel is closed.
 type quOut struct {
-	c  chan *QuOutItemsSynced
+	c  chan *QuOutItemsWithLock
 	wg sync.WaitGroup
 }
 
 func newQuOut() *quOut {
 	q := &quOut{
-		c: make(chan *QuOutItemsSynced, QuOutSize),
+		c: make(chan *QuOutItemsWithLock, QuOutSize),
 	}
 	q.wg.Add(1)
 	go func() {
@@ -45,13 +45,13 @@ func newQuOut() *quOut {
 
 // QuIn is similar to quOut. See above.
 type quIn struct {
-	c  chan *QuInItemsSynced
+	c  chan *QuInItemsWithLock
 	wg sync.WaitGroup
 }
 
 func newQuIn() *quIn {
 	q := &quIn{
-		c: make(chan *QuInItemsSynced, QuInSize),
+		c: make(chan *QuInItemsWithLock, QuInSize),
 	}
 	q.wg.Add(1)
 	go func() {
@@ -80,7 +80,7 @@ func newQuHandshake() *quHandshake {
 }
 
 type quOutFlush struct {
-	c chan *QuOutItemsSynced
+	c chan *QuOutItemsWithLock
 }
 
 // newQuOutFlush returns a channel that will be flushed when it gets GC'd.
@@ -90,7 +90,7 @@ type quOutFlush struct {
 // All sends to the channel must be best-effort, because there may be no receivers.
 func newQuOutFlush(d *Device) *quOutFlush {
 	q := &quOutFlush{
-		c: make(chan *QuOutItemsSynced, QuOutSize),
+		c: make(chan *QuOutItemsWithLock, QuOutSize),
 	}
 	// SetFinalizer is analagous to drop method in Rust
 	runtime.SetFinalizer(q, d.flushQuOut)
@@ -100,13 +100,13 @@ func newQuOutFlush(d *Device) *quOutFlush {
 func (d *Device) flushQuOut(q *quOutFlush) {
 	for {
 		select {
-		case quOutItems := <-q.c:
-			quOutItems.Lock()
-			for _, item := range quOutItems.items {
+		case items := <-q.c:
+			items.Lock()
+			for _, item := range items.items {
 				d.PutMessageBuf(item.buf)
-				d.PutOutItem(item)
+				d.PutQuOutItem(item)
 			}
-			d.PutOutItemsSynced(quOutItems)
+			d.PutQuOutItemsWithLock(items)
 		default:
 			return
 		}
@@ -114,7 +114,7 @@ func (d *Device) flushQuOut(q *quOutFlush) {
 }
 
 type quInFlush struct {
-	c chan *QuInItemsSynced
+	c chan *QuInItemsWithLock
 }
 
 // newQuInFlush returns a channel that will be flushed when it gets GC'd.
@@ -123,7 +123,7 @@ type quInFlush struct {
 // some other means, such as sending a sentinel nil values.
 func newQuInFlush(device *Device) *quInFlush {
 	q := &quInFlush{
-		c: make(chan *QuInItemsSynced, QuInSize),
+		c: make(chan *QuInItemsWithLock, QuInSize),
 	}
 	runtime.SetFinalizer(q, device.flushQuIn)
 	return q
@@ -132,13 +132,13 @@ func newQuInFlush(device *Device) *quInFlush {
 func (d *Device) flushQuIn(q *quInFlush) {
 	for {
 		select {
-		case quInItems := <-q.c:
-			quInItems.Lock()
-			for _, item := range quInItems.items {
+		case items := <-q.c:
+			items.Lock()
+			for _, item := range items.items {
 				d.PutMessageBuf(item.buf)
-				d.PutInItem(item)
+				d.PutQuInItem(item)
 			}
-			d.PutInItemsSynced(quInItems)
+			d.PutQuInItemsWithLock(items)
 		default:
 			return
 		}

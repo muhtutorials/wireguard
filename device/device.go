@@ -80,11 +80,12 @@ type rateLimiter struct {
 }
 
 type pools struct {
-	outItemsSynced *WaitPool
-	inItemsSynced  *WaitPool
-	outItems       *WaitPool
-	inItems        *WaitPool
-	messageBufs    *WaitPool
+	quOutItemsWithLock *WaitPool
+	quInItemsWithLock  *WaitPool
+	quOutItems         *WaitPool
+	quInItems          *WaitPool
+	// TODO: why is it not part of items?
+	messageBufs *WaitPool
 }
 
 type deviceQus struct {

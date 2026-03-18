@@ -42,18 +42,18 @@ func (p *WaitPool) Put(val any) {
 }
 
 func (d *Device) PopulatePools() {
-	d.pools.outItemsSynced = NewWaitPool(PreallocatedBufsPerPool, func() any {
+	d.pools.quOutItemsWithLock = NewWaitPool(PreallocatedBufsPerPool, func() any {
 		items := make([]*QuOutItem, 0, d.BatchSize())
-		return &QuOutItemsSynced{items: items}
+		return &QuOutItemsWithLock{items: items}
 	})
-	d.pools.inItemsSynced = NewWaitPool(PreallocatedBufsPerPool, func() any {
+	d.pools.quInItemsWithLock = NewWaitPool(PreallocatedBufsPerPool, func() any {
 		items := make([]*QuInItem, 0, d.BatchSize())
-		return &QuInItemsSynced{items: items}
+		return &QuInItemsWithLock{items: items}
 	})
-	d.pools.outItems = NewWaitPool(PreallocatedBufsPerPool, func() any {
+	d.pools.quOutItems = NewWaitPool(PreallocatedBufsPerPool, func() any {
 		return new(QuOutItem)
 	})
-	d.pools.inItems = NewWaitPool(PreallocatedBufsPerPool, func() any {
+	d.pools.quInItems = NewWaitPool(PreallocatedBufsPerPool, func() any {
 		return new(QuInItem)
 	})
 	d.pools.messageBufs = NewWaitPool(PreallocatedBufsPerPool, func() any {
@@ -61,50 +61,52 @@ func (d *Device) PopulatePools() {
 	})
 }
 
-func (d *Device) GetOutItemsSynced() *QuOutItemsSynced {
-	items := d.pools.outItemsSynced.Get().(*QuOutItemsSynced)
+func (d *Device) GetQuOutItemsWithLock() *QuOutItemsWithLock {
+	items := d.pools.quOutItemsWithLock.Get().(*QuOutItemsWithLock)
+	// lock is not released in RoutineSequentialSender, so we just
+	// reinitialize the mutex when we get the items again
 	items.Mutex = sync.Mutex{}
 	return items
 }
 
-func (d *Device) PutOutItemsSynced(q *QuOutItemsSynced) {
+func (d *Device) PutQuOutItemsWithLock(q *QuOutItemsWithLock) {
 	for i := range q.items {
 		q.items[i] = nil
 	}
 	q.items = q.items[:0]
-	d.pools.outItemsSynced.Put(q)
+	d.pools.quOutItemsWithLock.Put(q)
 }
 
-func (d *Device) GetInItemsSynced() *QuInItemsSynced {
-	items := d.pools.inItemsSynced.Get().(*QuInItemsSynced)
+func (d *Device) GetQuInItemsWithLock() *QuInItemsWithLock {
+	items := d.pools.quInItemsWithLock.Get().(*QuInItemsWithLock)
 	items.Mutex = sync.Mutex{}
 	return items
 }
 
-func (d *Device) PutInItemsSynced(q *QuInItemsSynced) {
+func (d *Device) PutQuInItemsWithLock(q *QuInItemsWithLock) {
 	for i := range q.items {
 		q.items[i] = nil
 	}
 	q.items = q.items[:0]
-	d.pools.inItemsSynced.Put(q)
+	d.pools.quInItemsWithLock.Put(q)
 }
 
-func (d *Device) GetOutItem() *QuOutItem {
-	return d.pools.outItems.Get().(*QuOutItem)
+func (d *Device) GetQuOutItem() *QuOutItem {
+	return d.pools.quOutItems.Get().(*QuOutItem)
 }
 
-func (d *Device) PutOutItem(item *QuOutItem) {
+func (d *Device) PutQuOutItem(item *QuOutItem) {
 	item.zeroOutPointers()
-	d.pools.outItems.Put(item)
+	d.pools.quOutItems.Put(item)
 }
 
-func (d *Device) GetInItem() *QuInItem {
-	return d.pools.inItems.Get().(*QuInItem)
+func (d *Device) GetQuInItem() *QuInItem {
+	return d.pools.quInItems.Get().(*QuInItem)
 }
 
-func (d *Device) PutInItem(item *QuInItem) {
+func (d *Device) PutQuInItem(item *QuInItem) {
 	item.zeroOutPointers()
-	d.pools.inItems.Put(item)
+	d.pools.quInItems.Put(item)
 }
 
 func (d *Device) GetMessageBuf() *[MaxMessageSize]byte {
@@ -113,4 +115,12 @@ func (d *Device) GetMessageBuf() *[MaxMessageSize]byte {
 
 func (d *Device) PutMessageBuf(msg *[MaxMessageSize]byte) {
 	d.pools.messageBufs.Put(msg)
+}
+
+func (d *Device) PutQuOutItems(items *QuOutItemsWithLock) {
+	for _, item := range items.items {
+		d.PutMessageBuf(item.buf)
+		d.PutQuOutItem(item)
+	}
+	d.PutQuOutItemsWithLock(items)
 }

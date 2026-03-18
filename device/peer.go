@@ -40,8 +40,9 @@ type endpoint struct {
 }
 
 type peerQus struct {
-	// staged packets before a handshake is available
-	staged chan *QuOutItemsSynced
+	// peer's received packets before handshake was
+	// established or during reestablishing handshake
+	staged chan *QuOutItemsWithLock
 	// sequential ordering of UDP transmission
 	out *quOutFlush
 	// sequential ordering of tun writing
@@ -75,7 +76,7 @@ func (d *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	// create peer
 	var peer *Peer
 	peer.device = d
-	peer.qus.staged = make(chan *QuOutItemsSynced, QuStagedSize)
+	peer.qus.staged = make(chan *QuOutItemsWithLock, QuStagedSize)
 	peer.qus.out = newQuOutFlush(d)
 	peer.qus.in = newQuInFlush(d)
 	peer.cookieGenerator.Init(pk)

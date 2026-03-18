@@ -75,23 +75,23 @@ type Tun struct {
 	batchSize               int
 	vnetHdr                 bool
 	udpGSO                  bool
-
-	closeOnce sync.Once
-
-	nameOnce  sync.Once // guards calling initNameCache, which sets following fields
-	nameCache string    // name of interface
+	closeOnce               sync.Once
+	// guards calling initNameCache, which sets following fields
+	nameOnce  sync.Once
+	nameCache string // name of interface
 	nameErr   error
-
-	readMu  sync.Mutex                    // readMu guards readBuff
-	readBuf [virtioNetHdrLen + 65535]byte // if vnetHdr every read is prefixed by virtioNetHdr
-
-	writeMu     sync.Mutex // writeMu guards toWrite, tcpGROTable
-	toWrite     []int      // bufs at indexes to write
+	readMu    sync.Mutex // readMu guards readBuf
+	// if vnetHdr every read is prefixed by virtioNetHdr
+	readBuf [virtioNetHdrLen + 65535]byte
+	// writeMu guards toWrite, tcpGROTable
+	writeMu     sync.Mutex
+	toWrite     []int // bufs at indexes to write
 	tcpGROTable *tcpGROTable
 	udpGROTable *udpGROTable
 }
 
-// createNetlinkSocket creates a NETLINK socket that monitors network interface changes
+// createNetlinkSocket creates a NETLINK socket
+// that monitors network interface changes
 func createNetlinkSocket() (int, error) {
 	sock, err := unix.Socket(
 		unix.AF_NETLINK,                 // kernel-user communication protocol
@@ -106,7 +106,9 @@ func createNetlinkSocket() (int, error) {
 	// RTMGRP_IPV6_IFADDR: IPv6 address changes (add/remove)
 	addr := &unix.SockaddrNetlink{
 		Family: unix.AF_NETLINK,
-		Groups: unix.RTMGRP_LINK | unix.RTMGRP_IPV4_IFADDR | unix.RTMGRP_IPV6_IFADDR,
+		Groups: unix.RTMGRP_LINK |
+			unix.RTMGRP_IPV4_IFADDR |
+			unix.RTMGRP_IPV6_IFADDR,
 	}
 	if err := unix.Bind(sock, addr); err != nil {
 		return -1, err
@@ -131,7 +133,10 @@ func (tun *Tun) routineNetlinkListener() {
 				break
 			}
 			if !tun.netlinkCancel.ReadyRead() {
-				tun.errors <- fmt.Errorf("netlink socket closed: %w", err)
+				tun.errors <- fmt.Errorf(
+					"netlink socket closed: %w",
+					err,
+				)
 				return
 			}
 		}
@@ -165,7 +170,8 @@ func (tun *Tun) routineNetlinkListener() {
 					// not our interface
 					continue
 				}
-				// IFF_RUNNING indicates whether a network interface has physical layer connectivity
+				// IFF_RUNNING indicates whether a network interface
+				// has physical layer connectivity
 				if info.Flags&unix.IFF_RUNNING != 0 {
 					tun.events <- EventUp
 					wasEverUp = true
@@ -388,10 +394,16 @@ func (tun *Tun) nameSlow() (string, error) {
 			uintptr(unsafe.Pointer(&ifReq[0])),
 		)
 	}); err != nil {
-		return "", fmt.Errorf("failed to get name of TUN device: %w", err)
+		return "", fmt.Errorf(
+			"failed to get name of TUN device: %w",
+			err,
+		)
 	}
 	if errno != 0 {
-		return "", fmt.Errorf("failed to get name of TUN device: %w", errno)
+		return "", fmt.Errorf(
+			"failed to get name of TUN device: %w",
+			errno,
+		)
 	}
 	// ByteSliceToString discards bytes from ifReq[:] slice
 	// starting from C-string terminator (0 byte)
@@ -442,10 +454,16 @@ func (tun *Tun) Write(bufs [][]byte, offset int) (int, error) {
 	return total, errs
 }
 
-// handleVirtioRead splits `in` into `bufs`, leaving offset bytes at the front of
-// each buffer. It mutates sizes to reflect the size of each element of `bufs`,
+// handleVirtioRead splits `in` into `bufs`, leaving offset
+// bytes at the front of each buffer. It mutates sizes
+// to reflect the size of each element of `bufs`,
 // and returns the number of packets read.
-func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, error) {
+func handleVirtioRead(
+	in []byte,
+	bufs [][]byte,
+	sizes []int,
+	offset int,
+) (int, error) {
 	var hdr virtioNetHdr
 	if err := hdr.decode(in); err != nil {
 		return 0, err
@@ -465,29 +483,48 @@ func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, e
 			}
 		}
 		if len(in) > len(bufs[0][offset:]) {
-			return 0, fmt.Errorf("read len %d overflows bufs element len %d", len(in), len(bufs[0][offset:]))
+			return 0, fmt.Errorf(
+				"read len %d overflows bufs element len %d",
+				len(in),
+				len(bufs[0][offset:]),
+			)
 		}
 		n := copy(bufs[0][offset:], in)
 		sizes[0] = n
 		return 1, nil
 	}
-	// VIRTIO_NET_HDR_GSO_TCPV4: TCP over IPv4 packet that needs segmentation by the host hardware
-	// VIRTIO_NET_HDR_GSO_TCPV6: TCP over IPv6 packet that needs segmentation by the host hardware
-	// VIRTIO_NET_HDR_GSO_UDP_L4: UDP packet that needs segmentation by the host hardware
-	// at the transport layer (L4)
-	if hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_TCPV4 && hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_TCPV6 && hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_UDP_L4 {
+	// VIRTIO_NET_HDR_GSO_TCPV4:
+	// 	TCP over IPv4 packet that needs segmentation by the host hardware
+	// VIRTIO_NET_HDR_GSO_TCPV6:
+	// 	TCP over IPv6 packet that needs segmentation by the host hardware
+	// VIRTIO_NET_HDR_GSO_UDP_L4:
+	// 	UDP packet that needs segmentation by the host hardware
+	// 	at the transport layer (L4)
+	if hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_TCPV4 &&
+		hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_TCPV6 &&
+		hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_UDP_L4 {
 		return 0, fmt.Errorf("unsupported virtio GSO type: %d", hdr.gsoType)
 	}
 	// extracts IP version
 	ipVersion := in[0] >> 4
 	switch ipVersion {
 	case 4:
-		if hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_TCPV4 && hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_UDP_L4 {
-			return 0, fmt.Errorf("ip header version: %d, GSO type: %d", ipVersion, hdr.gsoType)
+		if hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_TCPV4 &&
+			hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_UDP_L4 {
+			return 0, fmt.Errorf(
+				"ip header version: %d, GSO type: %d",
+				ipVersion,
+				hdr.gsoType,
+			)
 		}
 	case 6:
-		if hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_TCPV6 && hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_UDP_L4 {
-			return 0, fmt.Errorf("ip header version: %d, GSO type: %d", ipVersion, hdr.gsoType)
+		if hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_TCPV6 &&
+			hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_UDP_L4 {
+			return 0, fmt.Errorf(
+				"ip header version: %d, GSO type: %d",
+				ipVersion,
+				hdr.gsoType,
+			)
 		}
 	default:
 		return 0, fmt.Errorf("invalid ip header version: %d", ipVersion)
@@ -511,16 +548,28 @@ func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, e
 		hdr.hdrLen = hdr.csumStart + tcpHLen
 	}
 	if len(in) < int(hdr.hdrLen) {
-		return 0, fmt.Errorf("length of packet (%d) < virtioNetHdr.hdrLen (%d)", len(in), hdr.hdrLen)
+		return 0, fmt.Errorf(
+			"length of packet (%d) < virtioNetHdr.hdrLen (%d)",
+			len(in),
+			hdr.hdrLen,
+		)
 	}
 	// NOTE: redundant defensive programming?
 	if hdr.hdrLen < hdr.csumStart {
-		return 0, fmt.Errorf("virtioNetHdr.hdrLen (%d) < virtioNetHdr.csumStart (%d)", hdr.hdrLen, hdr.csumStart)
+		return 0, fmt.Errorf(
+			"virtioNetHdr.hdrLen (%d) < virtioNetHdr.csumStart (%d)",
+			hdr.hdrLen,
+			hdr.csumStart,
+		)
 	}
 	checksumAt := int(hdr.csumStart + hdr.csumOffset)
 	// check if checksum field is inside `in`
 	if checksumAt+1 >= len(in) {
-		return 0, fmt.Errorf("end of checksum offset (%d) exceeds packet length (%d)", checksumAt+1, len(in))
+		return 0, fmt.Errorf(
+			"end of checksum offset (%d) exceeds packet length (%d)",
+			checksumAt+1,
+			len(in),
+		)
 	}
 	return gsoSplit(in, hdr, bufs, sizes, offset, ipVersion == 6)
 }
@@ -619,22 +668,31 @@ func (tun *Tun) initFromFlags(name string) error {
 			return
 		}
 		resp := ifReq.Uint16()
-		// IFF_VNET_HDR: indicates the TUN/TAP device will use a virtio-net header in front of each packet.
-		// This enables communication of offloading metadata between kernel and userspace.
+		// IFF_VNET_HDR: indicates the TUN/TAP device will use a
+		// virtio-net header in front of each packet. This enables
+		// communication of offloading metadata between kernel and userspace.
 		// Allows userspace programs to handle hardware offloading.
 		if resp&unix.IFF_VNET_HDR != 0 {
-			// tunTCPOffloads were added in Linux v2.6. We require their support
-			// if IFF_VNET_HDR is set.
+			// tunTCPOffloads were added in Linux v2.6.
+			// We require their support if IFF_VNET_HDR is set.
 			// TUNSETOFFLOAD is a Linux ioctl command used to enable or
 			// disable hardware offloading features on TUN/TAP devices.
-			if err = unix.IoctlSetInt(int(fd), unix.TUNSETOFFLOAD, tunTCPOffloads); err != nil {
+			if err = unix.IoctlSetInt(
+				int(fd),
+				unix.TUNSETOFFLOAD,
+				tunTCPOffloads,
+			); err != nil {
 				return
 			}
 			tun.vnetHdr = true
 			tun.batchSize = conn.BatchSize
 			// tunUDPOffloads were added in Linux v6.2. We do not return an
 			// error if they are unsupported at runtime.
-			tun.udpGSO = unix.IoctlSetInt(int(fd), unix.TUNSETOFFLOAD, tunTCPOffloads|tunUDPOffloads) == nil
+			tun.udpGSO = unix.IoctlSetInt(
+				int(fd),
+				unix.TUNSETOFFLOAD,
+				tunTCPOffloads|tunUDPOffloads,
+			) == nil
 		} else {
 			tun.batchSize = 1
 		}
@@ -651,7 +709,11 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	fd, err := unix.Open(cloneDevicePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("CreateTUN (%q) failed; %s does not exist", name, cloneDevicePath)
+			return nil, fmt.Errorf(
+				"CreateTUN (%q) failed; %s does not exist",
+				name,
+				cloneDevicePath,
+			)
 		}
 		return nil, err
 	}
@@ -676,7 +738,8 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		unix.Close(fd)
 		return nil, err
 	}
-	// open, ioctl, nonblock must happen prior to handing it to netpoll as below this line
+	// open, ioctl, nonblock must happen prior to handing
+	// it to netpoll as below this line
 	file := os.NewFile(uintptr(fd), cloneDevicePath)
 	return CreateTUNFromFile(file, mtu)
 }

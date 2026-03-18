@@ -7,9 +7,9 @@ import (
 )
 
 type QuHandshake struct {
+	msgType  uint32
 	buf      *[MaxMessageSize]byte
 	packet   []byte
-	msgType  uint32
 	endpoint conn.Endpoint
 }
 
@@ -21,7 +21,7 @@ type QuInItem struct {
 	endpoint conn.Endpoint
 }
 
-type QuInItemsSynced struct {
+type QuInItemsWithLock struct {
 	items []*QuInItem
 	sync.Mutex
 }

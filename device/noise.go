@@ -66,6 +66,7 @@ const (
 	// size of cookie reply message
 	MessageCookieReplySize = 64
 	// size of data preceding content in transport message
+	// (uint32 + uint32 + uint64 = 16 byte)
 	MessageTransportHeaderSize = 16
 	// size of empty transport
 	MessageTransportSize = MessageTransportHeaderSize + chacha20poly1305.Overhead
