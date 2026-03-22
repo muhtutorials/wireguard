@@ -229,7 +229,7 @@ func (cc *CookieChecker) CreateReply(
 	size := len(msg)
 	mac2Start := size - blake2s.Size128
 	mac1Start := mac2Start - blake2s.Size128
-	var reply *MessageCookieReply
+	reply := new(MessageCookieReply)
 	reply.Type = MessageCookieReplyType
 	// Identifies which cryptographic session this packet belongs to.
 	// It contains the index of the recipient's current sending key.
@@ -267,9 +267,9 @@ func (cg *CookieGenerator) Init(pk NoisePublicKey) {
 
 // ConsumeReply consumes/processes the cookie reply.
 // It's called when:
-//   - A peer receives a MessageCookieReply in response to
+//   - A client receives a MessageCookieReply in response to
 //     a previously sent message.
-//   - It validates the cookie and stores it for future use.
+//   - A client validates the cookie and stores it for future use.
 func (cg *CookieGenerator) ConsumeReply(msg *MessageCookieReply) bool {
 	cg.Lock()
 	defer cg.Unlock()

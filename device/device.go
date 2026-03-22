@@ -13,13 +13,14 @@ import (
 )
 
 type Device struct {
-	state         state
-	net           deviceNet
-	tun           deviceTun
-	keys          keys // static identity
-	peers         peers
-	rateLimiter   rateLimiter
-	router        Router
+	state       state
+	net         deviceNet
+	tun         deviceTun
+	keys        keys // static identity
+	peers       peers
+	rateLimiter rateLimiter
+	router      Router
+	// connects receiver to peer, handshake and keypair
 	indexTable    IndexTable
 	pools         pools
 	qus           deviceQus
@@ -95,7 +96,7 @@ type deviceQus struct {
 }
 
 func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
-	var d *Device
+	d := new(Device)
 	d.state.val.Store(uint32(deviceStateDown))
 	d.net.bind = bind
 	d.tun.device = tunDevice
@@ -108,7 +109,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	d.peers.val = make(map[NoisePublicKey]*Peer)
 	d.rateLimiter.val.Init()
 	d.indexTable.Init()
-	d.PopulatePools()
+	d.InitPools()
 	// create queues
 	d.qus.handshake = newQuHandshake()
 	d.qus.encryption = newQuOut()
@@ -118,7 +119,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	// start workers
 	cpus := runtime.NumCPU()
 	d.state.stopping.Wait()
-	d.qus.encryption.wg.Add(cpus) // One for each RoutineHandshake
+	d.qus.encryption.wg.Add(cpus) // one for each RoutineHandshake
 	for i := range cpus {
 		go d.RoutineHandshake(i + 1)
 		go d.RoutineEncryption(i + 1)
@@ -288,11 +289,11 @@ func (d *Device) Down() error {
 	return d.changeState(deviceStateDown)
 }
 
-// IsUnderLoad checks if currently under load
+// IsUnderLoad checks if device is currently under load.
 func (d *Device) IsUnderLoad() bool {
 	now := time.Now()
 	// Check the length of the handshake queue.
-	// If it's at least 1/8 of QuHandshakeSize, the device is considered "under load".
+	// If it's at least 1/8 of QuHandshakeSize, the device is considered under load.
 	// This indicates too many pending handshakes.
 	underLoad := len(d.qus.handshake.c) >= QuHandshakeSize/8
 	if underLoad {

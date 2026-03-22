@@ -454,12 +454,12 @@ func padding(packetSize, mtu int) int {
 // Encrypts the elements in the queue and marks them
 // for sequential consumption (by releasing the mutex).
 // There should be one instance per core.
-func (device *Device) RoutineEncryption(id int) {
+func (d *Device) RoutineEncryption(id int) {
 	var paddingZeros [PaddingMultiple]byte
 	var nonce [chacha20poly1305.NonceSize]byte
-	defer device.log.Verbosef("Routine: encryption worker %d - stopped", id)
-	device.log.Verbosef("Routine: encryption worker %d - started", id)
-	for items := range device.qus.encryption.c {
+	defer d.log.Verbosef("Routine: encryption worker %d - stopped", id)
+	d.log.Verbosef("Routine: encryption worker %d - started", id)
+	for items := range d.qus.encryption.c {
 		for _, item := range items.items {
 			// populate header fields
 			header := item.buf[:MessageTransportHeaderSize]
@@ -470,7 +470,7 @@ func (device *Device) RoutineEncryption(id int) {
 			binary.LittleEndian.PutUint32(msgReceiver, item.keypair.remoteIndex)
 			binary.LittleEndian.PutUint64(msgCounter, item.nonce)
 			// pad content to multiple of 16
-			paddingSize := padding(len(item.packet), int(device.tun.mtu.Load()))
+			paddingSize := padding(len(item.packet), int(d.tun.mtu.Load()))
 			item.packet = append(item.packet, paddingZeros[:paddingSize]...)
 			// encrypt content and release to consumer
 			// TODO: why are firt 4 bytes not written to?

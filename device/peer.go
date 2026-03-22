@@ -74,7 +74,7 @@ func (d *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 		return nil, errors.New("too many peers")
 	}
 	// create peer
-	var peer *Peer
+	peer := new(Peer)
 	peer.device = d
 	peer.qus.staged = make(chan *QuOutItemsWithLock, QuStagedSize)
 	peer.qus.out = newQuOutFlush(d)

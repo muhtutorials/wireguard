@@ -30,7 +30,8 @@ const (
 )
 
 const (
-	// minimum size of transport message (keepalive)
+	// minimum size of transport message (keepalive,
+	// which is equal MessageTransportSize)
 	MinMessageSize = MessageKeepaliveSize
 	// maximum size of transport message (largest possible UDP datagram)
 	MaxMessageSize = MaxSegmentSize

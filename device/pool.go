@@ -41,7 +41,7 @@ func (p *WaitPool) Put(val any) {
 	p.mu.Unlock()
 }
 
-func (d *Device) PopulatePools() {
+func (d *Device) InitPools() {
 	d.pools.quOutItemsWithLock = NewWaitPool(PreallocatedBufsPerPool, func() any {
 		items := make([]*QuOutItem, 0, d.BatchSize())
 		return &QuOutItemsWithLock{items: items}
@@ -123,4 +123,12 @@ func (d *Device) PutQuOutItems(items *QuOutItemsWithLock) {
 		d.PutQuOutItem(item)
 	}
 	d.PutQuOutItemsWithLock(items)
+}
+
+func (d *Device) PutQuInItems(items *QuInItemsWithLock) {
+	for _, item := range items.items {
+		d.PutMessageBuf(item.buf)
+		d.PutQuInItem(item)
+	}
+	d.PutQuInItemsWithLock(items)
 }

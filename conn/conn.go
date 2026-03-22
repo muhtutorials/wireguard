@@ -53,8 +53,8 @@ type Bind interface {
 //	src: the local address from which datagrams originate going to the peer
 type Endpoint interface {
 	ClearSrc()           // clears the source address
-	SrcToString() string // returns the local source address (ip:port)
-	DstToString() string // returns the destination address (ip:port)
+	SrcToString() string // returns the local source address (IP:port)
+	DstToString() string // returns the destination address (IP:port)
 	DstToBytes() []byte  // used for mac2 cookie calculations
 	SrcIP() netip.Addr
 	DstIP() netip.Addr

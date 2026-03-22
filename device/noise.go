@@ -69,6 +69,7 @@ const (
 	// (uint32 + uint32 + uint64 = 16 byte)
 	MessageTransportHeaderSize = 16
 	// size of empty transport
+	// TODO: what is chacha20poly1305.Overhead?
 	MessageTransportSize = MessageTransportHeaderSize + chacha20poly1305.Overhead
 	// size of keepalive
 	MessageKeepaliveSize = MessageTransportSize
@@ -76,6 +77,7 @@ const (
 	MessageHandshakeSize = MessageInitiationSize
 )
 
+// offsets of encoded MessageTransport fields
 const (
 	MessageTransportOffsetReceiver = 4
 	MessageTransportOffsetCounter  = 8
@@ -171,7 +173,16 @@ func (m *MessageResponse) unmarshal(b []byte) error {
 }
 
 type MessageTransport struct {
-	Type     uint32
+	Type uint32
+	// Identifies which cryptographic session this packet belongs to.
+	// It contains the index of the recipient's current sending key.
+	// It tells the receiver: "Use the private key associated
+	// with this index to decrypt the payload of this message."
+	// During the handshake, peers exchange and store
+	// each other's public keys and assign them an index.
+	// This index is a much smaller and more efficient way
+	// to reference the correct key for a session than sending
+	// the full public key with every data packet.
 	Receiver uint32
 	Counter  uint64
 	Content  []byte
@@ -565,7 +576,7 @@ func (peer *Peer) BeginSymmetricSession() error {
 	setZero(hs.localEphemeral[:])
 	peer.handshake.state = handshakeZeroed
 	// create AEAD instances
-	var keypair *Keypair
+	keypair := new(Keypair)
 	keypair.send, _ = chacha20poly1305.New(sendKey[:])
 	keypair.receive, _ = chacha20poly1305.New(recvKey[:])
 	setZero(sendKey[:])
@@ -604,20 +615,34 @@ func (peer *Peer) BeginSymmetricSession() error {
 	return nil
 }
 
-func (peer *Peer) ReceivedWithKeypair(rcvdKP *Keypair) bool {
-	kps := &peer.keypairs
-	if kps.next.Load() != rcvdKP {
+func (peer *Peer) ReceivedWithKeypair(kp *Keypair) bool {
+	keypairs := &peer.keypairs
+	// Check if the received keypair matches
+	// the next (pending) keypair.
+	// This is a quick atomic read to avoid
+	// locking if it doesn't match.
+	if keypairs.next.Load() != kp {
 		return false
 	}
-	kps.Lock()
-	defer kps.Unlock()
-	if kps.next.Load() != rcvdKP {
+	// acquire lock and re-validate
+	keypairs.Lock()
+	defer keypairs.Unlock()
+	// double-check that the next keypair hasn't
+	// changed between the first check and acquiring
+	// the lock (prevents race conditions)
+	if keypairs.next.Load() != kp {
 		return false
 	}
-	prev := kps.previous
-	kps.previous = kps.current
+	// Perform the rotation:
+	//		      Before	                             After
+	// previous → old keypair (to be deleted)    previous ← old current
+	// current → actively used keypair	         current ← old next
+	// next → pending keypair	                 next ← nil
+	prev := keypairs.previous
+	keypairs.previous = keypairs.current
 	peer.device.DeleteKeypair(prev)
-	kps.current = kps.next.Load()
-	kps.next.Store(nil)
+	keypairs.current = keypairs.next.Load()
+	// TODO: where was it set before?
+	keypairs.next.Store(nil)
 	return true
 }
