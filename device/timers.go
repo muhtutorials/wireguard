@@ -116,8 +116,8 @@ func expiredSendKeepalive(peer *Peer) {
 	}
 }
 
-func expiredPersistentKeepalive(peer *Peer) {
-	if peer.persistentKeepaliveInterval.Load() > 0 {
+func expiredKeepalive(peer *Peer) {
+	if peer.KeepaliveInterval.Load() > 0 {
 		peer.SendKeepalive()
 	}
 }
@@ -135,7 +135,7 @@ func (peer *Peer) timersInit() {
 	peer.timers.newHandshake = peer.NewTimer(expiredNewHandshake)
 	peer.timers.retransmitHandshake = peer.NewTimer(expiredRetransmitHandshake)
 	peer.timers.sendKeepalive = peer.NewTimer(expiredSendKeepalive)
-	peer.timers.persistentKeepalive = peer.NewTimer(expiredPersistentKeepalive)
+	peer.timers.Keepalive = peer.NewTimer(expiredKeepalive)
 	peer.timers.zeroKeyMaterial = peer.NewTimer(expiredZeroKeyMaterial)
 }
 
@@ -149,7 +149,7 @@ func (peer *Peer) timersStop() {
 	peer.timers.newHandshake.DelSync()
 	peer.timers.retransmitHandshake.DelSync()
 	peer.timers.sendKeepalive.DelSync()
-	peer.timers.persistentKeepalive.DelSync()
+	peer.timers.Keepalive.DelSync()
 	peer.timers.zeroKeyMaterial.DelSync()
 }
 
@@ -222,8 +222,8 @@ func (peer *Peer) timersSessionDerived() {
 // Should be called before a packet with authentication
 // (keepalive, data, or handshake) is sent, or after one is received.
 func (peer *Peer) timersAnyAuthenticatedPacketTraversal() {
-	keepalive := peer.persistentKeepaliveInterval.Load()
+	keepalive := peer.KeepaliveInterval.Load()
 	if keepalive > 0 && peer.timersActive() {
-		peer.timers.persistentKeepalive.Mod(time.Duration(keepalive) * time.Second)
+		peer.timers.Keepalive.Mod(time.Duration(keepalive) * time.Second)
 	}
 }

@@ -576,3 +576,43 @@ Description: source address (for policy routing or IPv6 source-destination routi
 
 RTA_MARK
 Description: firewall mark value (for policy routing based on packet marks).
+
+EPROTO
+Description: protocol error.
+It indicates that a protocol-specific error occurred during a socket or network operation.
+
+EADDRINUSE
+Description: address already in use error.
+This occurs when attempting to bind a socket to a network address (IP address and port combination) that is already in use by another socket.
+
+Umask
+Description: Umask (user file-creation mode mask) is a permission mask that determines which permission bits are disabled when new files or directories are created. It subtracts permissions from the default creation mode.
+Default file creation mode: Typically 0666 (rw-rw-rw-).
+Default directory creation mode: Typically 0777 (rwxrwxrwx).
+Umask removes permissions: Actual permissions = default mode & ^umask.
+
+InotifyInit
+Description: provides access to the Linux kernel's file system event monitoring subsystem.
+It returns a file descriptor that can be used to watch for file system events like modifications, deletions, and attribute changes.
+
+InotifyAddWatch
+Description: adds or modifies a watch on a file or directory for an inotify instance. It returns a watch descriptor (WD) that identifies the watch for future operations.
+
+IN_ATTRIB
+Description: metadata changed (permissions, timestamps, etc.).
+Usage:
+unix.InotifyAddWatch(
+		uapi.inotifyFd,
+		socketPath,
+		unix.IN_ATTRIB|
+			unix.IN_DELETE|
+			unix.IN_DELETE_SELF,
+	)
+
+IN_DELETE
+Description: file/directory deleted from watched directory.
+Usage: as above.
+
+IN_DELETE_SELF
+Description: watched file/directory was deleted.
+Usage: as above.

@@ -12,9 +12,14 @@ import (
 	"github.com/muhtutorials/wireguard/tun"
 )
 
+// server gets an encrypted message from the bind, decrypts it,
+// sends it via TUN to the website, then reads the response from TUN,
+// encrypts it, and sends it back to the peer via bind
 type Device struct {
-	state       state
-	net         deviceNet
+	state state
+	// handles the encrypted WireGuard traffic to and from peers
+	net deviceNet
+	// handles the plain-text internet requests and responses
 	tun         deviceTun
 	keys        keys // static identity
 	peers       peers
@@ -25,7 +30,7 @@ type Device struct {
 	pools         pools
 	qus           deviceQus
 	cookieChecker CookieChecker
-	ipcMutex      sync.RWMutex
+	ipcMu         sync.RWMutex
 	closed        chan struct{}
 	log           *Logger
 }
@@ -253,12 +258,12 @@ func (d *Device) upLocked() error {
 	}
 	// The IPC set operation waits for peers to be created before calling Start() on them,
 	// so if there's a concurrent IPC set request happening, we should wait for it to complete.
-	d.ipcMutex.Lock()
-	defer d.ipcMutex.Unlock()
+	d.ipcMu.Lock()
+	defer d.ipcMu.Unlock()
 	d.peers.RLock()
 	for _, peer := range d.peers.val {
 		peer.Start()
-		if peer.persistentKeepaliveInterval.Load() > 0 {
+		if peer.KeepaliveInterval.Load() > 0 {
 			peer.SendKeepalive()
 		}
 	}
@@ -367,8 +372,8 @@ func (d *Device) SendKeepalives() {
 func (d *Device) Close() {
 	d.state.Lock()
 	defer d.state.Unlock()
-	d.ipcMutex.Lock()
-	defer d.ipcMutex.Unlock()
+	d.ipcMu.Lock()
+	defer d.ipcMu.Unlock()
 	if d.isClosed() {
 		return
 	}
@@ -441,6 +446,7 @@ func (d *Device) BindSetMark(mark uint32) error {
 	return nil
 }
 
+// BindUpdate updates bind's port when changed via CLI.
 func (d *Device) BindUpdate() error {
 	d.net.Lock()
 	defer d.net.Unlock()

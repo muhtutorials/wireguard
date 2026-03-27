@@ -11,21 +11,21 @@ import (
 )
 
 type Peer struct {
-	device                      *Device
-	handshake                   Handshake
-	keypairs                    Keypairs
-	endpoint                    endpoint
-	qus                         peerQus
-	timers                      timers
-	nodes                       list.List
-	cookieGenerator             CookieGenerator
-	txBytes                     atomic.Uint64 // bytes send to peer (endpoint)
-	rxBytes                     atomic.Uint64 // bytes received from peer
-	isRunning                   atomic.Bool
-	lastHandshake               atomic.Int64 // nano seconds since epoch
-	persistentKeepaliveInterval atomic.Uint32
-	stopping                    sync.WaitGroup // routines pending stop
-	sync.Mutex                                 // protects against concurrent Start/Stop
+	device            *Device
+	handshake         Handshake
+	keypairs          Keypairs
+	endpoint          endpoint
+	qus               peerQus
+	timers            timers
+	nodes             list.List
+	cookieGenerator   CookieGenerator
+	txBytes           atomic.Uint64 // bytes send to peer (endpoint)
+	rxBytes           atomic.Uint64 // bytes received from peer
+	isRunning         atomic.Bool
+	lastHandshake     atomic.Int64 // nanoseconds since epoch
+	KeepaliveInterval atomic.Uint32
+	stopping          sync.WaitGroup // routines pending stop
+	sync.Mutex                       // protects against concurrent Start/Stop
 }
 
 type endpoint struct {
@@ -53,7 +53,7 @@ type timers struct {
 	newHandshake            *Timer
 	retransmitHandshake     *Timer
 	sendKeepalive           *Timer
-	persistentKeepalive     *Timer
+	Keepalive               *Timer
 	zeroKeyMaterial         *Timer
 	handshakeAttempts       atomic.Uint32
 	sentLastMinuteHandshake atomic.Bool
