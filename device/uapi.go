@@ -49,6 +49,7 @@ func (d *Device) IpcGetOperation(w io.Writer) error {
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer bufPool.Put(buf)
+	// writes formatted string to buf and then a new line
 	sendf := func(format string, args ...any) {
 		fmt.Fprintf(buf, format, args...)
 		buf.WriteByte('\n')
@@ -56,7 +57,8 @@ func (d *Device) IpcGetOperation(w io.Writer) error {
 	// Converts a 32-byte binary key into a line of text like:
 	// private_key=3c7e1a2b9f4d8e6a1b3c5d7e9f0a2b4c6d8e0f1a2b3c4d5e6f7a8b9c0d1e2f3a
 	keyf := func(prefix string, key *[32]byte) {
-		// '+2': 1 for '=' and 1 for '\n'
+		// `len(key)*2`: each byte is represented by two hex characters
+		// `+2`: 1 for '=' and 1 for '\n'
 		buf.Grow(len(prefix) + len(key)*2 + 2)
 		buf.WriteString(prefix)
 		buf.WriteByte('=')
@@ -109,6 +111,7 @@ func (d *Device) IpcGetOperation(w io.Writer) error {
 			peer.endpoint.Unlock()
 			nano := peer.lastHandshake.Load()
 			secs := nano / time.Second.Nanoseconds()
+			// remainder of nanosecond
 			nano %= time.Second.Nanoseconds()
 			sendf("last_handshake_time_sec=%d", secs)
 			sendf("last_handshake_time_nsec=%d", nano)
@@ -139,28 +142,37 @@ func (d *Device) IpcSetOperation(r io.Reader) (err error) {
 		}
 	}()
 	peer := new(ipcSetPeer)
+	// when true, we're configuring device-level settings
 	deviceConfig := true
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
 			// Blank line means terminate operation.
-			peer.handlePostConfig()
+			peer.applyConfig()
 			return nil
 		}
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
-			return ipcErrorf(ipc.IpcErrorProtocol, "failed to parse line %q", line)
+			return ipcErrorf(
+				ipc.IpcErrorProtocol,
+				"failed to parse line %q",
+				line,
+			)
 		}
 		if key == "public_key" {
 			if deviceConfig {
 				deviceConfig = false
 			}
-			peer.handlePostConfig()
+			// Apply any pending configuration for the previous peer
+			// that was being built, because handlePublicKeyLine
+			// will reset the ipcSetPeer struct.
+			peer.applyConfig()
 			// Load/create the peer we are now configuring.
 			if err := d.handlePublicKeyLine(peer, value); err != nil {
 				return err
 			}
+			// continue handling peer
 			continue
 		}
 		if deviceConfig {
@@ -169,7 +181,7 @@ func (d *Device) IpcSetOperation(r io.Reader) (err error) {
 			return d.handlePeerLine(peer, key, value)
 		}
 	}
-	peer.handlePostConfig()
+	peer.applyConfig()
 	if err := scanner.Err(); err != nil {
 		return ipcErrorf(ipc.IpcErrorIO, "failed to read input: %w", err)
 	}
@@ -190,13 +202,11 @@ type ipcSetPeer struct {
 	keepaliveOn bool // peer had keepalive turned on
 }
 
-func (peer *ipcSetPeer) handlePostConfig() {
+// applyConfig applies all the accumulated settings, stored
+// temporarily in the ipcSetPeer struct, for a peer to the device.
+func (peer *ipcSetPeer) applyConfig() {
 	if peer.Peer == nil || peer.dummy {
 		return
-	}
-	if peer.new {
-		peer.endpoint.disableRoaming =
-			peer.device.net.brokenRoaming && peer.endpoint.val != nil
 	}
 	if peer.device.isUp() {
 		peer.Start()
@@ -212,7 +222,11 @@ func (d *Device) handlePublicKeyLine(peer *ipcSetPeer, pubKey string) error {
 	var publicKey NoisePublicKey
 	err := publicKey.FromHex(pubKey)
 	if err != nil {
-		return ipcErrorf(ipc.IpcErrorInvalid, "failed to get peer by public key: %w", err)
+		return ipcErrorf(
+			ipc.IpcErrorInvalid,
+			"failed to get peer by public key: %w",
+			err,
+		)
 	}
 	// Ignore peer with the same public key as this device.
 	d.keys.RLock()
@@ -221,15 +235,161 @@ func (d *Device) handlePublicKeyLine(peer *ipcSetPeer, pubKey string) error {
 	if peer.dummy {
 		peer.Peer = &Peer{}
 	} else {
-		peer.Peer = d.LookupPeer(publicKey)
+		peer.Peer = d.GetPeer(publicKey)
 	}
+	// check if peer is new or already existed
 	peer.new = peer.Peer == nil
 	if peer.new {
 		peer.Peer, err = d.NewPeer(publicKey)
 		if err != nil {
-			return ipcErrorf(ipc.IpcErrorInvalid, "failed to create new peer: %w", err)
+			return ipcErrorf(
+				ipc.IpcErrorInvalid,
+				"failed to create new peer: %w",
+				err,
+			)
 		}
 		d.log.Verbosef("%v - UAPI: Created", peer.Peer)
+	}
+	return nil
+}
+
+func (d *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error {
+	switch key {
+	// TODO: not completely clear why this case is needed
+	case "update_only":
+		// prevents creation of a new peer,
+		// only allowing updates to existing ones
+		if value != "true" {
+			return ipcErrorf(
+				ipc.IpcErrorInvalid,
+				"failed to set update only, invalid value: %v",
+				value,
+			)
+		}
+		if peer.new && !peer.dummy {
+			d.RemovePeer(peer.handshake.remoteStatic)
+			peer.Peer = &Peer{}
+			peer.dummy = true
+		}
+	case "remove":
+		// remove currently selected peer from device
+		if value != "true" {
+			return ipcErrorf(
+				ipc.IpcErrorInvalid,
+				"failed to set remove, invalid value: %v",
+				value,
+			)
+		}
+		if !peer.dummy {
+			d.log.Verbosef("%v - UAPI: Removing", peer.Peer)
+			d.RemovePeer(peer.handshake.remoteStatic)
+		}
+		peer.Peer = &Peer{}
+		peer.dummy = true
+	case "preshared_key":
+		d.log.Verbosef("%v - UAPI: Updating preshared key", peer.Peer)
+		peer.handshake.Lock()
+		defer peer.handshake.Unlock()
+		if err := peer.handshake.presharedKey.FromHex(value); err != nil {
+			return ipcErrorf(
+				ipc.IpcErrorInvalid,
+				"failed to set preshared key: %w",
+				err,
+			)
+		}
+	case "endpoint":
+		d.log.Verbosef("%v - UAPI: Updating endpoint", peer.Peer)
+		endpoint, err := d.net.bind.ParseEndpoint(value)
+		if err != nil {
+			return ipcErrorf(
+				ipc.IpcErrorInvalid,
+				"failed to set endpoint %v: %w",
+				value,
+				err,
+			)
+		}
+		peer.endpoint.Lock()
+		defer peer.endpoint.Unlock()
+		peer.endpoint.val = endpoint
+	case "keepalive_interval":
+		d.log.Verbosef(
+			"%v - UAPI: Updating keepalive interval",
+			peer.Peer,
+		)
+		secs, err := strconv.ParseUint(value, 10, 16)
+		if err != nil {
+			return ipcErrorf(
+				ipc.IpcErrorInvalid,
+				"failed to set keepalive interval: %w",
+				err,
+			)
+		}
+		old := peer.KeepaliveInterval.Swap(uint32(secs))
+		// Send immediate keepalive if we're turning it on and before it wasn't on.
+		peer.keepaliveOn = old == 0 && secs != 0
+	case "replace_allowed_ips":
+		d.log.Verbosef("%v - UAPI: Removing all allowed IPs", peer.Peer)
+		if value != "true" {
+			return ipcErrorf(
+				ipc.IpcErrorInvalid,
+				"failed to replace allowed IPs, invalid value: %v",
+				value,
+			)
+		}
+		if peer.dummy {
+			return nil
+		}
+		d.router.RemoveByPeer(peer.Peer)
+	case "allowed_ip":
+		add := true
+		verb := "Adding"
+		if len(value) > 0 && value[0] == '-' {
+			add = false
+			verb = "Removing"
+			value = value[1:]
+		}
+		d.log.Verbosef("%v - UAPI: %s allowed IP", peer.Peer, verb)
+		// Parse a CIDR where the address has host bits set:
+		// 	prefix, _ := netip.ParsePrefix("192.168.1.100/24")
+		// 	fmt.Println("Original prefix:", prefix)
+		// 	fmt.Println("Address:", prefix.Addr())
+		// 	fmt.Println("Masked address:", prefix.Masked().Addr())
+		// 	fmt.Println("Bits:", prefix.Bits())
+		// Output:
+		// 	Original prefix: 192.168.1.100/24
+		// 	Address: 192.168.1.100
+		// 	Masked address: 192.168.1.0
+		// 	Bits: 24
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			return ipcErrorf(
+				ipc.IpcErrorInvalid,
+				"failed to set allowed_ip: %w",
+				err,
+			)
+		}
+		if peer.dummy {
+			return nil
+		}
+		if add {
+			d.router.Insert(prefix, peer.Peer)
+		} else {
+			d.router.Remove(prefix, peer.Peer)
+		}
+	case "protocol_version":
+		if value != "1" {
+			return ipcErrorf(
+				ipc.IpcErrorInvalid,
+				"invalid protocol version: %v",
+				value,
+			)
+		}
+	default:
+		return ipcErrorf(
+			ipc.IpcErrorInvalid,
+			"invalid UAPI peer key: %v",
+			key,
+		)
 	}
 	return nil
 }
@@ -305,146 +465,6 @@ func (d *Device) handleDeviceLine(key, value string) error {
 	return nil
 }
 
-func (d *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error {
-	switch key {
-	case "update_only":
-		// allow disabling of creation
-		if value != "true" {
-			return ipcErrorf(
-				ipc.IpcErrorInvalid,
-				"failed to set update only, invalid value: %v",
-				value,
-			)
-		}
-		if peer.new && !peer.dummy {
-			d.RemovePeer(peer.handshake.remoteStatic)
-			peer.Peer = &Peer{}
-			peer.dummy = true
-		}
-	case "remove":
-		// remove currently selected peer from device
-		if value != "true" {
-			return ipcErrorf(
-				ipc.IpcErrorInvalid,
-				"failed to set remove, invalid value: %v",
-				value,
-			)
-		}
-		if !peer.dummy {
-			d.log.Verbosef("%v - UAPI: Removing", peer.Peer)
-			d.RemovePeer(peer.handshake.remoteStatic)
-		}
-		peer.Peer = &Peer{}
-		peer.dummy = true
-	case "preshared_key":
-		d.log.Verbosef("%v - UAPI: Updating preshared key", peer.Peer)
-		peer.handshake.Lock()
-		defer peer.handshake.Unlock()
-		err := peer.handshake.presharedKey.FromHex(value)
-		if err != nil {
-			return ipcErrorf(
-				ipc.IpcErrorInvalid,
-				"failed to set preshared key: %w",
-				err,
-			)
-		}
-	case "endpoint":
-		d.log.Verbosef("%v - UAPI: Updating endpoint", peer.Peer)
-		endpoint, err := d.net.bind.ParseEndpoint(value)
-		if err != nil {
-			return ipcErrorf(
-				ipc.IpcErrorInvalid,
-				"failed to set endpoint %v: %w",
-				value,
-				err,
-			)
-		}
-		peer.endpoint.Lock()
-		defer peer.endpoint.Unlock()
-		peer.endpoint.val = endpoint
-	case "keepalive_interval":
-		d.log.Verbosef(
-			"%v - UAPI: Updating keepalive interval",
-			peer.Peer,
-		)
-		secs, err := strconv.ParseUint(value, 10, 16)
-		if err != nil {
-			return ipcErrorf(
-				ipc.IpcErrorInvalid,
-				"failed to set keepalive interval: %w",
-				err,
-			)
-		}
-		old := peer.KeepaliveInterval.Swap(uint32(secs))
-		// Send immediate keepalive if we're turning it on and before it wasn't on.
-		peer.keepaliveOn = old == 0 && secs != 0
-	case "replace_allowed_ips":
-		d.log.Verbosef("%v - UAPI: Removing all allowedips", peer.Peer)
-		if value != "true" {
-			return ipcErrorf(
-				ipc.IpcErrorInvalid,
-				"failed to replace allowedips, invalid value: %v",
-				value,
-			)
-		}
-		if peer.dummy {
-			return nil
-		}
-		d.router.RemoveByPeer(peer.Peer)
-	case "allowed_ip":
-		add := true
-		verb := "Adding"
-		if len(value) > 0 && value[0] == '-' {
-			add = false
-			verb = "Removing"
-			value = value[1:]
-		}
-		d.log.Verbosef("%v - UAPI: %s allowedip", peer.Peer, verb)
-		// Parse a CIDR where the address has host bits set
-		// prefix, _ := netip.ParsePrefix("192.168.1.100/24")
-		// fmt.Println("Original prefix:", prefix)
-		// fmt.Println("Address:", prefix.Addr())
-		// fmt.Println("Masked address:", prefix.Masked().Addr())
-		// fmt.Println("Bits:", prefix.Bits())
-		// Output:
-		// 	Original prefix: 192.168.1.100/24
-		// 	Address: 192.168.1.100
-		// 	Masked address: 192.168.1.0
-		// 	Bits: 24
-		prefix, err := netip.ParsePrefix(value)
-		if err != nil {
-			return ipcErrorf(
-				ipc.IpcErrorInvalid,
-				"failed to set allowed ip: %w",
-				err,
-			)
-		}
-		if peer.dummy {
-			return nil
-		}
-		if add {
-			d.router.Insert(prefix, peer.Peer)
-		} else {
-			d.router.Remove(prefix, peer.Peer)
-		}
-	case "protocol_version":
-		if value != "1" {
-			return ipcErrorf(
-				ipc.IpcErrorInvalid,
-				"invalid protocol version: %v",
-				value,
-			)
-		}
-	default:
-		return ipcErrorf(
-			ipc.IpcErrorInvalid,
-			"invalid UAPI peer key: %v",
-			key,
-		)
-	}
-	return nil
-}
-
 func (d *Device) IpcGet() (string, error) {
 	buf := new(strings.Builder)
 	if err := d.IpcGetOperation(buf); err != nil {
@@ -457,10 +477,10 @@ func (d *Device) IpcSet(config string) error {
 	return d.IpcSetOperation(strings.NewReader(config))
 }
 
-func (device *Device) IpcHandle(socket net.Conn) {
-	defer socket.Close()
-	r := bufio.NewReader(socket)
-	w := bufio.NewWriter(socket)
+func (device *Device) IpcHandle(conn net.Conn) {
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	w := bufio.NewWriter(conn)
 	buf := bufio.NewReadWriter(r, w)
 	for {
 		op, err := buf.ReadString('\n')
@@ -469,11 +489,8 @@ func (device *Device) IpcHandle(socket net.Conn) {
 		}
 		// handle operation
 		switch op {
-		case "set=1\n":
-			err = device.IpcSetOperation(buf.Reader)
 		case "get=1\n":
-			var nextByte byte
-			nextByte, err = buf.ReadByte()
+			nextByte, err := buf.ReadByte()
 			if err != nil {
 				return
 			}
@@ -486,19 +503,21 @@ func (device *Device) IpcHandle(socket net.Conn) {
 				break
 			}
 			err = device.IpcGetOperation(buf.Writer)
+		case "set=1\n":
+			err = device.IpcSetOperation(buf.Reader)
 		default:
 			device.log.Errorf("invalid UAPI operation: %v", op)
 			return
 		}
-		// write status
-		var status *IPCError
-		if err != nil && !errors.As(err, &status) {
+		// write IPC error
+		var ipcErr *IPCError
+		if err != nil && !errors.As(err, &ipcErr) {
 			// shouldn't happen
-			status = ipcErrorf(ipc.IpcErrorUnknown, "other UAPI error: %w", err)
+			ipcErr = ipcErrorf(ipc.IpcErrorUnknown, "other UAPI error: %w", err)
 		}
-		if status != nil {
-			device.log.Errorf("%v", status)
-			fmt.Fprintf(buf, "errno=%d\n\n", status.ErrorCode())
+		if ipcErr != nil {
+			device.log.Errorf("%v", ipcErr)
+			fmt.Fprintf(buf, "errno=%d\n\n", ipcErr.ErrorCode())
 		} else {
 			fmt.Fprintf(buf, "errno=0\n\n")
 		}

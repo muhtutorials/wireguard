@@ -2,14 +2,14 @@
 package replay
 
 const (
-	// used for division by 64
+	// used for division by 64 to get block index
 	blockBitShift = 6
-	// Number of bits in a block. Must be power of 2.
-	nBits = 1 << blockBitShift // 1 << 6 == 64
-	// Number of blocks in the ring buffer. Must be power of 2.
-	nBlocks    = 1 << 7                // 1 << 7 == 128
-	bitMask    = nBits - 1             // 64 - 1 == 63 == 0b0011_1111
-	blockMask  = nBlocks - 1           // 128 - 1 == 127 == 0b0111_1111
+	// Number of bits in a block. Must be a power of 2.
+	nBits = 1 << blockBitShift // 1 << 6 = 64
+	// Number of blocks in the ring buffer. Must be a power of 2.
+	nBlocks    = 1 << 7                // 1 << 7 = 128
+	bitMask    = nBits - 1             // 64 - 1 = 63 = 0b0011_1111
+	blockMask  = nBlocks - 1           // 128 - 1 = 127 = 0b0111_1111
 	windowSize = (nBlocks - 1) * nBits // (128 - 1) * 64 = 8128
 )
 
@@ -17,7 +17,7 @@ type block uint64
 
 // Filter rejects replayed messages by checking if message counter value is
 // within the sliding window of previously received messages.
-// The zero value for Filter is an empty filter ready for use.
+// The zero value for Filter is an empty Filter ready for use.
 // Filters are unsafe for concurrent use.
 type Filter struct {
 	// highest value seen so far

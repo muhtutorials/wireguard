@@ -34,8 +34,6 @@ type endpoint struct {
 	// When true clearSrcOnTx indicates that the source address
 	// should NOT be cleared when transmitting.
 	clearSrcOnTx bool
-	// disableRoaming prevents the peer from changing IP addresses
-	disableRoaming bool
 	sync.Mutex
 }
 
@@ -60,6 +58,8 @@ type timers struct {
 	needAnotherKeepalive    atomic.Bool
 }
 
+// NewPeer is used by handlePublicKeyLine method to create
+// a new peer by providing a public key via IPC.
 func (d *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	if d.isClosed() {
 		return nil, errors.New("device closed")
@@ -94,7 +94,6 @@ func (d *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	// reset endpoint
 	peer.endpoint.Lock()
 	peer.endpoint.val = nil
-	peer.endpoint.disableRoaming = false
 	peer.endpoint.clearSrcOnTx = false
 	peer.endpoint.Unlock()
 	// init timers
@@ -263,9 +262,6 @@ func (peer *Peer) ExpireCurrentKeypairs() {
 func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 	peer.endpoint.Lock()
 	defer peer.endpoint.Unlock()
-	if peer.endpoint.disableRoaming {
-		return
-	}
 	peer.endpoint.clearSrcOnTx = false
 	peer.endpoint.val = endpoint
 }

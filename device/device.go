@@ -24,7 +24,8 @@ type Device struct {
 	keys        keys // static identity
 	peers       peers
 	rateLimiter rateLimiter
-	router      Router
+	// allowed IPs
+	router Router
 	// connects receiver to peer, handshake and keypair
 	indexTable    IndexTable
 	pools         pools
@@ -59,7 +60,6 @@ type deviceNet struct {
 	netlinkCancel *rwcancel.RWCancel
 	port          uint16 // listening port
 	fwmark        uint32 // mark value (0 = disabled)
-	brokenRoaming bool
 	stopping      sync.WaitGroup
 	sync.RWMutex
 }
@@ -145,6 +145,7 @@ func (d *Device) SetPrivateKey(priv NoisePrivateKey) error {
 	}
 	d.peers.Lock()
 	defer d.peers.Unlock()
+	// peers with their handshakes locked
 	lockedPeers := make([]*Peer, 0, len(d.peers.val))
 	for _, peer := range d.peers.val {
 		peer.handshake.RLock()
@@ -161,6 +162,9 @@ func (d *Device) SetPrivateKey(priv NoisePrivateKey) error {
 		// 	Logical completeness (the system shouldn't peer with
 		//  itself even if it somehow becomes possible).
 		if peer.handshake.remoteStatic.Equals(publicKey) {
+			// We need to release the lock here because:
+			// 	removePeerLocked -> peer.Stop() -> peer.ZeroAndFlushAll() ->
+			// 	-> peer.ZeroAndFlushAll() -> handshake.Lock()
 			peer.handshake.RUnlock()
 			removePeerLocked(d, peer, key)
 			peer.handshake.RLock()
@@ -313,7 +317,7 @@ func (d *Device) IsUnderLoad() bool {
 	return d.rateLimiter.underLoadUntil.Load() > now.UnixNano()
 }
 
-func (d *Device) LookupPeer(pk NoisePublicKey) *Peer {
+func (d *Device) GetPeer(pk NoisePublicKey) *Peer {
 	d.peers.RLock()
 	defer d.peers.RUnlock()
 	return d.peers.val[pk]
@@ -419,10 +423,10 @@ func (d *Device) Bind() conn.Bind {
 
 // BindSetMark sets a firewall mark (or fwmark) that can be attached
 // to network packets in the Linux kernel. It's used for:
-//
-//	Policy routing - Direct packets through specific routing tables based on their mark.
-//	Packet filtering - Apply different firewall rules to marked packets.
-//	Traffic control - Shape or prioritize marked traffic differently.
+// - Policy routing - Direct packets through specific routing tables based on their mark.
+// - Packet filtering - Apply different firewall rules to marked packets.
+// - Traffic control - Shape or prioritize marked traffic differently.
+// Set via CLI.
 func (d *Device) BindSetMark(mark uint32) error {
 	d.net.Lock()
 	defer d.net.Unlock()

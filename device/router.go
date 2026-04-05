@@ -413,7 +413,7 @@ func (r *Router) Find(ip []byte) *Peer {
 	case net.IPv6len:
 		return r.IPv6.find(ip)
 	default:
-		panic(errors.New("looking up unknown address type"))
+		panic(errors.New("unknown address type"))
 	}
 }
 

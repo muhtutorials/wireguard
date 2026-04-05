@@ -147,10 +147,10 @@ func (t *tcpGROTable) reset() {
 	}
 }
 
-// lookupOrInsert looks up a flow for the provided packet and metadata,
+// getOrInsert gets a flow for the provided packet and metadata,
 // returning the packets found for the flow, or inserting a new one if none
 // is found.
-func (t *tcpGROTable) lookupOrInsert(
+func (t *tcpGROTable) getOrInsert(
 	pkt []byte,
 	srcAddrOffset,
 	dstAddrOffset,
@@ -277,10 +277,10 @@ func (u *udpGROTable) reset() {
 	}
 }
 
-// lookupOrInsert looks up a flow for the provided packet and metadata,
+// getOrInsert gets a flow for the provided packet and metadata,
 // returning the packets found for the flow, or inserting a new one if none
 // is found.
-func (u *udpGROTable) lookupOrInsert(
+func (u *udpGROTable) getOrInsert(
 	pkt []byte,
 	srcAddrOffset,
 	dstAddrOffset,
@@ -733,7 +733,7 @@ func tcpGRO(
 		srcAddrOffset = ipv6SrcAddrOffset
 		addrLen = 16
 	}
-	items, existing := table.lookupOrInsert(pkt, srcAddrOffset, srcAddrOffset+addrLen, iphLen, tcphLen, pktBufsIndex)
+	items, existing := table.getOrInsert(pkt, srcAddrOffset, srcAddrOffset+addrLen, iphLen, tcphLen, pktBufsIndex)
 	if !existing {
 		return groResultTableInsert
 	}
@@ -831,7 +831,7 @@ func udpGRO(
 		srcAddrOffset = ipv6SrcAddrOffset
 		addrLen = 16
 	}
-	items, existing := table.lookupOrInsert(pkt, srcAddrOffset, srcAddrOffset+addrLen, iphLen, pktBufsIndex)
+	items, existing := table.getOrInsert(pkt, srcAddrOffset, srcAddrOffset+addrLen, iphLen, pktBufsIndex)
 	if !existing {
 		return groResultTableInsert
 	}

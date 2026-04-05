@@ -80,7 +80,7 @@ func (item *QuOutItem) zeroOutPointers() {
 	item.peer = nil
 }
 
-// Queues a keepalive if no packets are queued for peer.
+// SendKeepalive queues a keepalive if no packets are queued for peer.
 func (peer *Peer) SendKeepalive() {
 	if len(peer.qus.staged) == 0 && peer.isRunning.Load() {
 		item := peer.device.NewQuOutItem()

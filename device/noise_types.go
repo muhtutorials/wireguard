@@ -74,19 +74,23 @@ func (key *NoisePrivateKey) FromMaybeZeroHex(src string) error {
 	return err
 }
 
+// Equals checks if two keys are equal using ConstantTimeCompare.
 func (key NoisePublicKey) Equals(key2 NoisePublicKey) bool {
 	return subtle.ConstantTimeCompare(key[:], key2[:]) == 1
 }
 
+// IsZero checks if key is all zeroes.
 func (key NoisePublicKey) IsZero() bool {
 	var zero NoisePublicKey
 	return key.Equals(zero)
 }
 
+// FromHex converts hex string to bytes.
 func (key *NoisePublicKey) FromHex(src string) error {
 	return hexToBytes(key[:], src)
 }
 
+// FromHex converts hex string to bytes.
 func (key *NoisePresharedKey) FromHex(src string) error {
 	return hexToBytes(key[:], src)
 }

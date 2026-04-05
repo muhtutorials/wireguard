@@ -218,14 +218,19 @@ func (m *MessageCookieReply) unmarshal(b []byte) error {
 }
 
 type Handshake struct {
-	state                     handshakeState
-	hash                      [blake2s.Size]byte       // hash value
-	chainKey                  [blake2s.Size]byte       // chain key
-	presharedKey              NoisePresharedKey        // psk
-	localEphemeral            NoisePrivateKey          // ephemeral secret key
-	localIndex                uint32                   // used to clear hash-table
-	remoteIndex               uint32                   // index for sending
-	remoteStatic              NoisePublicKey           // long term key
+	state    handshakeState
+	hash     [blake2s.Size]byte // hash value
+	chainKey [blake2s.Size]byte // chain key
+	// Randomly generated pre-shared symmetric key or PSK.
+	// This key is generated on the server and shared
+	// with peer beforehand like peer's key pair.
+	presharedKey   NoisePresharedKey
+	localEphemeral NoisePrivateKey // ephemeral secret key
+	// random number assigned to a received handshake
+	localIndex  uint32
+	remoteIndex uint32 // index for sending
+	// peer's static public key
+	remoteStatic              NoisePublicKey
 	remoteEphemeral           NoisePublicKey           // ephemeral public key
 	precomputedSharedSecret   [NoisePublicKeySize]byte // precomputed shared secret
 	lastTimestamp             tai64n.Timestamp
@@ -351,8 +356,7 @@ func (d *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 		return nil
 	}
 	mixHash(&hash, &hash, msg.Static[:])
-	// lookup peer
-	peer := d.LookupPeer(peerPublicKey)
+	peer := d.GetPeer(peerPublicKey)
 	if peer == nil || !peer.isRunning.Load() {
 		return nil
 	}

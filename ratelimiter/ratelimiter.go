@@ -81,7 +81,7 @@ func (r *RateLimiter) cleanup() (empty bool) {
 }
 
 func (r *RateLimiter) Allow(ip netip.Addr) bool {
-	// lookup entry
+	// get entry
 	// TODO: race condition
 	r.mu.RLock()
 	entry, ok := r.table[ip]
