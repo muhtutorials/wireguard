@@ -35,25 +35,33 @@ func (f *Filter) Validate(value, limit uint64) bool {
 	if value >= limit {
 		return false
 	}
-	// divide by 64 to get block index (each block contains 64 bits)
+	// Divide by 64 to get the absolute block index
+	// (not inside ring buffer) to calculate how many
+	// blocks the window has moved.
 	blockIndex := value >> blockBitShift
-	if value > f.last { // move window forward
+	if value > f.last {
+		// move window forward
 		currentIndex := f.last >> blockBitShift
 		diff := blockIndex - currentIndex
-		// cap diff to clear the ring
-		diff = min(diff, nBits)
+		// cap diff at nBlocks, because if the window moves
+		// forward by more than nBlocks, everything in the
+		// ring buffer becomes stale and should be cleared.
+		diff = min(diff, nBlocks)
+		// clear the ring between `currentIndex` and `currentIndex+diff`
 		for i := currentIndex + 1; i <= currentIndex+diff; i++ {
-			// `i&blockMask` is modulo division by 128
+			// `i&blockMask` is modulo division of 127 by `i`
+			// (masks out numbers exeeding 127)
 			f.ring[i&blockMask] = 0
 		}
 		f.last = value
 	} else if f.last-value > windowSize { // behind current window
 		return false
 	}
-	// Check and set bit.
-	// Modulo division to get block index.
+	// Mask out higher bits to prevent "index out of range" error,
+	// because we have only 128 blocks.
 	blockIndex &= blockMask
-	// Modulo division to get bit index.
+	// get bit index by masking out values higher than 6th bit,
+	// because we have 64 bits in a block
 	bitIndex := value & bitMask
 	old := f.ring[blockIndex]
 	new := old | 1<<bitIndex
@@ -64,5 +72,5 @@ func (f *Filter) Validate(value, limit uint64) bool {
 // Reset resets the filter to empty state.
 func (f *Filter) Reset() {
 	f.last = 0
-	f.ring[0] = 0
+	f.ring = [nBlocks]block{}
 }
