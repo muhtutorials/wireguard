@@ -34,7 +34,7 @@ func New(fd int) (*RWCancel, error) {
 	}
 	rw := &RWCancel{fd: fd}
 	// os.Pipe() creates a unidirectional inter-process communication channel (pipe).
-	// Write End (w) → [PIPE BUFFER] → Read End (r)
+	// Write end (w) → [PIPE BUFFER] → Read end (r)
 	if rw.r, rw.w, err = os.Pipe(); err != nil {
 		return nil, err
 	}
@@ -68,7 +68,8 @@ func (rw *RWCancel) ReadyRead() bool {
 	}
 	var err error
 	for {
-		_, err = unix.Poll(pollFds, -1) // -1 = wait forever
+		// `-1`: wait forever
+		_, err = unix.Poll(pollFds, -1)
 		if err == nil || !RetriableError(err) {
 			break
 		}
@@ -77,7 +78,8 @@ func (rw *RWCancel) ReadyRead() bool {
 		return false
 	}
 	// Revents is returned events.
-	// if pfd.Revents & POLLIN != 0 { // "&" is used if several events are monitored
+	// `&` is used if several events are monitored
+	// if pfd.Revents & POLLIN != 0 {
 	//     socket has data to read
 	// }
 	// If a POLLIN event was sent on closeFd, it's the signal that
@@ -152,6 +154,7 @@ func (rw *RWCancel) Cancel() error {
 	return err
 }
 
+// TODO: why don't we close `rw.fd` here?
 func (rw *RWCancel) Close() {
 	rw.r.Close()
 	rw.w.Close()

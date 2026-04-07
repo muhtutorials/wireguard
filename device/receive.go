@@ -74,7 +74,7 @@ func (d *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.ReceiveFunc)
 	// receive datagrams until conn is closed
 	var (
 		arrBufs = make([]*[MaxMessageSize]byte, maxBatchSize)
-		// bufs[i] = arrBufs[i][:]
+		// slices of arrBufs
 		bufs        = make([][]byte, maxBatchSize)
 		sizes       = make([]int, maxBatchSize)
 		endpoints   = make([]conn.Endpoint, maxBatchSize)
@@ -145,6 +145,7 @@ func (d *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.ReceiveFunc)
 				item := d.GetQuInItem()
 				item.buf = arrBufs[i]
 				item.packet = packet
+				// set later by RoutineDecryption method
 				item.counter = 0
 				item.keypair = keypair
 				item.endpoint = endpoints[i]
@@ -280,6 +281,7 @@ func (d *Device) RoutineHandshake(id int) {
 					d.SendHandshakeCookie(&item)
 					goto skip
 				}
+				// TODO: is this the only place where ratelimiter used?
 				// check ratelimiter
 				if !d.rateLimiter.val.Allow(item.endpoint.DstIP()) {
 					goto skip

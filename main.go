@@ -32,6 +32,10 @@ func printUsage() {
 }
 
 func main() {
+	if len(os.Args) < 2 || len(os.Args) > 3 {
+		printUsage()
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
 		fmt.Printf(
 			"Userspace WireGuard daemon v%s for %s-%s.\n",
@@ -41,13 +45,13 @@ func main() {
 		)
 		return
 	}
-	var foreground bool
-	// interface name
-	var name string
-	if len(os.Args) < 2 || len(os.Args) > 3 {
-		printUsage()
-		return
-	}
+	var (
+		// when false this program starts a child process and exits,
+		// child process runs this program again, but with foreground = true
+		foreground bool
+		// interface name
+		name string
+	)
 	// Foreground mode:
 	// - The process stays attached to the terminal.
 	// - Output goes to stdout/stderr (visible in the terminal).
@@ -62,7 +66,6 @@ func main() {
 		}
 		name = os.Args[2]
 	default:
-		foreground = false
 		if len(os.Args) != 2 {
 			printUsage()
 			return
@@ -70,6 +73,8 @@ func main() {
 		name = os.Args[1]
 	}
 	if !foreground {
+		// ENV_WG_PROCESS_FOREGROUND is set before starting a child
+		// (background or daemon) process, in case it's not a foreground process
 		foreground = os.Getenv(ENV_WG_PROCESS_FOREGROUND) == "1"
 	}
 	// get log level (default: info)
@@ -84,13 +89,15 @@ func main() {
 		}
 		return device.LogLevelError
 	}()
-	// open TUN device (or use supplied fd)
+	// open TUN device (or use supplied FD)
 	tunDevice, err := func() (tun.Device, error) {
+		// ENV_WG_TUN_FD is set before starting a child
+		// (background or daemon) process, in case it's not a foreground process
 		tunFdStr := os.Getenv(ENV_WG_TUN_FD)
 		if tunFdStr == "" {
 			return tun.CreateTUN(name, device.DefaultMTU)
 		}
-		// construct tun device from supplied fd
+		// construct TUN device from supplied FD
 		fd, err := strconv.ParseUint(tunFdStr, 10, 32)
 		if err != nil {
 			return nil, err
@@ -118,6 +125,8 @@ func main() {
 	}
 	// open UAPI file (or use supplied fd)
 	uapiFile, err := func() (*os.File, error) {
+		// ENV_WG_UAPI_FD is set before starting a child
+		// (background or daemon) process, in case it's not a foreground process
 		uapiFdStr := os.Getenv(ENV_WG_UAPI_FD)
 		if uapiFdStr == "" {
 			return ipc.UAPIOpen(name)
@@ -134,42 +143,49 @@ func main() {
 		os.Exit(ExitSetupFailed)
 		return
 	}
-	// Background mode (foreground = false):
-	// 1. Daemonization: The program spawns a child process and exits.
-	// 2. File descriptor passing: It passes file descriptors
-	//    for the TUN device and UAPI socket (file descriptors 3 and 4).
-	// 3. Output redirection:
-	//    - If logging is enabled, stdout/stderr are kept.
-	//    - If silent mode, all outputs go to os.DevNull (discarded).
-	//    - stdin always goes to os.DevNull.
+	// Background mode (daemonization pattern):
+	// - Parent exits immediately - returns control to shell.
+	// - Child continues running - detached from terminal.
+	// - File descriptors are passed - avoids reopening devices.
+	// - No zombie processes - child is reparented to init.
 	if !foreground {
+		// Set up environment variables for child.
+		//
+		// Copy all current environment variables.
 		env := os.Environ()
-		env = append(env, fmt.Sprintf("%s=3", ENV_WG_TUN_FD))
-		env = append(env, fmt.Sprintf("%s=4", ENV_WG_UAPI_FD))
+		// mark as foreground
 		env = append(env, fmt.Sprintf("%s=1", ENV_WG_PROCESS_FOREGROUND))
+		// TUN FD = 3
+		env = append(env, fmt.Sprintf("%s=3", ENV_WG_TUN_FD))
+		// UAPI FD = 4
+		env = append(env, fmt.Sprintf("%s=4", ENV_WG_UAPI_FD))
 		files := [3]*os.File{}
 		// os.DevNull provides the platform-specific path to the null device.
 		// It's used for discarding output.
+		// Stdin (FD = 0) always goes to `/dev/null` (daemons don't read input).
 		if os.Getenv("LOG_LEVEL") != "" && logLevel != device.LogLevelSilent {
-			files[0], _ = os.Open(os.DevNull)
-			files[1] = os.Stdout
-			files[2] = os.Stderr
+			// logging enabled
+			files[0], _ = os.Open(os.DevNull) // stdin → `/dev/null`
+			files[1] = os.Stdout              // stdout → terminal
+			files[2] = os.Stderr              // stderr → terminal
 		} else {
-			files[0], _ = os.Open(os.DevNull)
-			files[1], _ = os.Open(os.DevNull)
-			files[2], _ = os.Open(os.DevNull)
+			// silent mode
+			files[0], _ = os.Open(os.DevNull) // stdin → `/dev/null`
+			files[1], _ = os.Open(os.DevNull) // stdout → `/dev/null`
+			files[2], _ = os.Open(os.DevNull) // stderr → `/dev/null`
 		}
 		attr := &os.ProcAttr{
+			Dir: ".", // sets working directory to current directory
+			Env: env, // passes the modified environment to child
 			Files: []*os.File{
-				files[0], // stdin
-				files[1], // stdout
-				files[2], // stderr
-				tunDevice.File(),
-				uapiFile,
+				files[0],         // stdin (FD = 0) - `/dev/null`
+				files[1],         // stdout (FD = 1) - terminal or `/dev/null`
+				files[2],         // stderr (FD = 2) - terminal or `/dev/null`
+				tunDevice.File(), // FD = 3 - TUN device (passed to child)
+				uapiFile,         // FD = 4 - UAPI socket (passed to child)
 			},
-			Dir: ".",
-			Env: env,
 		}
+		// Get path to current executable.
 		path, err := os.Executable()
 		if err != nil {
 			logger.Errorf("Failed to determine executable: %v", err)
@@ -178,12 +194,12 @@ func main() {
 		// The parent process creates the daemon child.
 		// The parent doesn't need to monitor or wait for the child.
 		// The parent exits immediately, leaving the child running as a daemon.
-		// Release() cleans up the handle since the parent won't call Wait().
 		process, err := os.StartProcess(path, os.Args, attr)
 		if err != nil {
 			logger.Errorf("Failed to daemonize: %v", err)
 			os.Exit(ExitSetupFailed)
 		}
+		// tell the OS we won't call Wait() on this child
 		process.Release()
 		return
 	}
