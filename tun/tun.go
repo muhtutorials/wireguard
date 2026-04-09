@@ -23,27 +23,34 @@ const (
 	EventMTUUpdate
 )
 
+var (
+	// ErrTooManySegments is returned by Device.Read() when segmentation
+	// overflows the length of supplied buffers. This error should not cause
+	// reads to cease.
+	ErrTooManySegments = errors.New("too many segments")
+)
+
 type Device interface {
-	// File returns the file descriptor of the device.
+	// File returns the file descriptor of the Device.
 	File() *os.File
 	// Read one or more packets from the Device (without any additional headers).
 	// On a successful read it returns the number of packets read, and sets
 	// packet lengths within the sizes slice. len(sizes) must be >= len(bufs).
 	// A nonzero offset can be used to instruct the Device on where to begin
 	// reading into each element of the bufs slice.
-	Read(bufs [][]byte, sizes []int, offset int) (n int, err error)
-	// Write one or more packets to the device (without any additional headers).
+	Read(bufs [][]byte, sizes []int, offset int) (nPackets int, err error)
+	// Write one or more packets to the Device (without any additional headers).
 	// On a successful write it returns the number of packets written. A nonzero
 	// offset can be used to instruct the Device on where to begin writing from
 	// each packet contained within the bufs slice.
-	Write(bufs [][]byte, offset int) (int, error)
-	// MTU returns the MTU of the Device.
-	// MTU (Maximum Transmission Unit) is the largest size packet
-	// or frame that can be transmitted over a network interface
+	Write(bufs [][]byte, offset int) (nPackets int, err error)
+	// MTU returns the maximum transmission unit of the Device.
+	// MTU is the largest size of packet that can
+	// be transmitted over a network interface.
 	MTU() (int, error)
 	// Name returns the current name of the Device.
 	Name() (string, error)
-	// Events returns a channel of type Event, which is fed Device events.
+	// Events returns a channel of Device events.
 	Events() <-chan Event
 	// Close stops the Device and closes the Event channel.
 	Close() error
@@ -54,36 +61,47 @@ type Device interface {
 }
 
 const (
+	// Opening this file acts as a "clone" operation,
+	// instructing the kernel to create a new virtual network
+	// interface (either TUN or TAP).
+	// Here it's used to request a new TUN interface for the VPN tunnel.
 	cloneDevicePath = "/dev/net/tun"
 	// IFNAMSIZ is maximum interface name size:
 	// 15 characters + 1 null terminator (16 bytes total).
-	// TODO: why do we add 64?
+	// 64: space for response (see getIfIndex).
 	ifReqSize = unix.IFNAMSIZ + 64
 )
 
 type Tun struct {
 	file   *os.File
-	index  int32      // if index
+	index  int32      // interface index
 	errors chan error // async error handling
 	events chan Event // device related events
-	// netlink is a communication mechanism between
-	// userspace processes and the Linux kernel
+	// netlink is a communication mechanism
+	// between userspace and kernel
 	netlinkSock             int
 	netlinkCancel           *rwcancel.RWCancel
 	hackListenerClosed      sync.Mutex
 	statusListenersShutdown chan struct{}
 	batchSize               int
-	vnetHdr                 bool
-	udpGSO                  bool
-	closeOnce               sync.Once
-	// guards calling initNameCache, which sets following fields
-	nameOnce  sync.Once
-	nameCache string // name of interface
-	nameErr   error
-	readMu    sync.Mutex // readMu guards readBuf
-	// if vnetHdr every read is prefixed by virtioNetHdr
+	// If true, indicates the TUN device will use a
+	// virtio-net header in front of each packet.
+	// This enables support of Generic Segmentation Offload (GSO)
+	// and checksum offloading.
+	vnetHdr   bool
+	udpGSO    bool
+	closeOnce sync.Once
+	// used by Name method to set nameCache and nameErr
+	nameOnce sync.Once
+	// cached interface name
+	nameCache string
+	// cached error
+	nameErr error
+	readMu  sync.Mutex // readMu guards readBuf
+	// if vnetHdr is true every read is prefixed by virtioNetHdr
 	readBuf [virtioNetHdrLen + 65535]byte
 	// writeMu guards toWrite, tcpGROTable
+	// TODO: does it guard udpGROTable?
 	writeMu     sync.Mutex
 	toWrite     []int // bufs at indexes to write
 	tcpGROTable *tcpGROTable
@@ -94,16 +112,20 @@ type Tun struct {
 // that monitors network interface changes
 func createNetlinkSocket() (int, error) {
 	sock, err := unix.Socket(
-		unix.AF_NETLINK,                 // kernel-user communication protocol
-		unix.SOCK_RAW|unix.SOCK_CLOEXEC, // raw access + auto-close on exec
-		unix.NETLINK_ROUTE,              // subscribe to routing/network events
+		// kernel-user communication protocol
+		unix.AF_NETLINK,
+		// raw access + auto-close on exec
+		unix.SOCK_RAW|unix.SOCK_CLOEXEC,
+		// subscribe to routing/network events
+		unix.NETLINK_ROUTE,
 	)
 	if err != nil {
 		return -1, err
 	}
-	// RTMGRP_LINK: network link status changes (interface up/down, etc.)
-	// RTMGRP_IPV4_IFADDR: IPv4 address changes (add/remove)
-	// RTMGRP_IPV6_IFADDR: IPv6 address changes (add/remove)
+	// RTMGRP_LINK: network link status changes
+	// (interface up/down, etc.).
+	// RTMGRP_IPV4_IFADDR: IPv4 address changes (add/remove).
+	// RTMGRP_IPV6_IFADDR: IPv6 address changes (add/remove).
 	addr := &unix.SockaddrNetlink{
 		Family: unix.AF_NETLINK,
 		Groups: unix.RTMGRP_LINK |
@@ -116,6 +138,10 @@ func createNetlinkSocket() (int, error) {
 	return sock, nil
 }
 
+// routineNetlinkListener monitors IFF_RUNNING flag inside IfInfomsg.
+// IFF_RUNNING flag indicates whether a network interface has allocated
+// its resources and is ready to transmit and receive packets.
+// Then the method sends events through tun.events channel.
 func (tun *Tun) routineNetlinkListener() {
 	defer func() {
 		unix.Close(tun.netlinkSock)
@@ -124,9 +150,11 @@ func (tun *Tun) routineNetlinkListener() {
 		tun.netlinkCancel.Close()
 	}()
 	for {
+		var (
+			n   int
+			err error
+		)
 		msg := make([]byte, 1<<16)
-		var n int
-		var err error
 		for {
 			n, _, _, _, err = unix.Recvmsg(tun.netlinkSock, msg[:], nil, 0)
 			if err == nil || !rwcancel.RetriableError(err) {
@@ -141,7 +169,10 @@ func (tun *Tun) routineNetlinkListener() {
 			}
 		}
 		if err != nil {
-			tun.errors <- fmt.Errorf("failed to receive netlink message: %w", err)
+			tun.errors <- fmt.Errorf(
+				"failed to receive netlink message: %w",
+				err,
+			)
 			return
 		}
 		select {
@@ -192,6 +223,13 @@ func (tun *Tun) routineNetlinkListener() {
 	}
 }
 
+// routineHackListener continuously polls the TUN file descriptor
+// by attempting a zero-byte write to detect whether the interface
+// is administratively up or down, then sends corresponding
+// events through tun.events channel.
+// This is a hack to detect the administrative state (up/down)
+// of a TUN interface without requiring privileged operations
+// or complex netlink monitoring.
 func (tun *Tun) routineHackListener() {
 	defer tun.hackListenerClosed.Unlock()
 	// this is needed for the detection to work across network namespaces
@@ -212,6 +250,7 @@ func (tun *Tun) routineHackListener() {
 			return
 		}
 		switch err {
+		// write is allowed, but writing 0 bytes is invalid input
 		case unix.EINVAL: // invalid argument
 			if last != up {
 				// If the tunnel is up, it reports that write() is
@@ -219,6 +258,7 @@ func (tun *Tun) routineHackListener() {
 				tun.events <- EventUp
 				last = up
 			}
+			// Device rejects any I/O because it's down
 		case unix.EIO: // I/O error
 			if last != down {
 				// If the tunnel is down, it reports that no I/O
@@ -266,13 +306,13 @@ func (tun *Tun) routineHackListener() {
 // getIfIndex returns the numeric index of a network interface
 // given its name (e.g., "eth0", "wlan0")
 func getIfIndex(name string) (int32, error) {
-	// AF_INET: Address family internet. Uses IPv4 addresses.
-	// SOCK_DGRAM: connectionless, unreliable datagram socket (UDP).
-	// SOCK_CLOEXEC: close on execute.
 	// Creates an IPv4 socket (AF_INET).
 	// Uses datagram/UDP socket type (SOCK_DGRAM).
 	// SOCK_CLOEXEC ensures the socket is closed if the process executes another program.
-	// The socket is only used for making ioctl calls, not for actual networking.
+	// The socket is only used for making IOCTL calls, not for actual networking.
+	// AF_INET: Address family internet, uses IPv4 addresses.
+	// SOCK_DGRAM: datagram socket (UDP).
+	// SOCK_CLOEXEC: close on execute.
 	fd, err := unix.Socket(
 		unix.AF_INET,
 		unix.SOCK_DGRAM|unix.SOCK_CLOEXEC,
@@ -284,12 +324,6 @@ func getIfIndex(name string) (int32, error) {
 	defer unix.Close(fd)
 	var ifReq [ifReqSize]byte
 	copy(ifReq[:], name)
-	// fd: your "network administrator's access badge"
-	// ioctl: the "request form" you submit
-	// interface name in ifReq: the actual network interface you want to modify
-	// Uses the ioctl system call with SIOCGIFINDEX command.
-	// Passes the socket file descriptor and pointer to the ifReq structure.
-	// The kernel fills in the interface index in the structure.
 	_, _, errno := unix.Syscall(
 		// tells the kernel to perform an "input/output control" operation
 		unix.SYS_IOCTL,
@@ -320,13 +354,11 @@ func (tun *Tun) setMTU(n int) error {
 		return err
 	}
 	defer unix.Close(fd)
-	// do ioctl call
 	var ifReq [ifReqSize]byte
+	// add name to ifReq
 	copy(ifReq[:], name)
+	// add MTU to ifReq right after name
 	*(*uint32)(unsafe.Pointer(&ifReq[unix.IFNAMSIZ])) = uint32(n)
-	// fd: your "network administrator's access badge"
-	// ioctl: the "request form" you submit
-	// interface name in ifReq: the actual network interface you want to modify
 	_, _, errno := unix.Syscall(
 		unix.SYS_IOCTL,
 		uintptr(fd),
@@ -355,7 +387,6 @@ func (tun *Tun) MTU() (int, error) {
 		return 0, err
 	}
 	defer unix.Close(fd)
-	// do ioctl call
 	var ifReq [ifReqSize]byte
 	copy(ifReq[:], name)
 	_, _, errno := unix.Syscall(
@@ -372,6 +403,7 @@ func (tun *Tun) MTU() (int, error) {
 }
 
 func (tun *Tun) Name() (string, error) {
+	// Do calls func only once
 	tun.nameOnce.Do(func() {
 		tun.nameCache, tun.nameErr = tun.nameSlow()
 	})
@@ -379,6 +411,9 @@ func (tun *Tun) Name() (string, error) {
 }
 
 func (tun *Tun) nameSlow() (string, error) {
+	// TUNGETIFF is a TUN-specific IOCTL that only works on TUN device FDs.
+	// That's why we use tun.file.SyscallConn().
+	// unix.Socket() is used for generic network IOCTL that works on any socket FD.
 	rawConn, err := tun.file.SyscallConn()
 	if err != nil {
 		return "", err
@@ -410,48 +445,60 @@ func (tun *Tun) nameSlow() (string, error) {
 	return unix.ByteSliceToString(ifReq[:]), nil
 }
 
-func (tun *Tun) Write(bufs [][]byte, offset int) (int, error) {
-	tun.writeMu.Lock()
-	defer func() {
-		tun.tcpGROTable.reset()
-		tun.udpGROTable.reset()
-		tun.writeMu.Unlock()
-	}()
-	var (
-		errs  error
-		total int
-	)
-	tun.toWrite = tun.toWrite[:0]
-	if tun.vnetHdr {
-		if err := handleGRO(
-			bufs,
-			offset,
-			tun.tcpGROTable,
-			tun.udpGROTable,
-			tun.udpGSO,
-			&tun.toWrite,
-		); err != nil {
-			return 0, err
+// Read is used by RoutineReadFromTUN to read
+// responses from websites requested by peers.
+// bufs:
+//
+//	for i := range items {
+//	    items[i] = d.NewQuOutItem()
+//	    bufs[i] = items[i].buf[:]
+//	},
+//
+// where item is popped from `quOutItems` pool and
+// item.buf is popped from `messageBufs` pool.
+// len(items) and len(sizes) = device.BatchSize()
+// sizes: numbers of bytes read into bufs.
+// offset: MessageTransportHeaderSize.
+// It's the size of data preceding Content field in
+// MessageTransport (uint32 + uint32 + uint64 = 16 byte):
+//
+//	type MessageTransport struct {
+//	    Type     uint32
+//	    Receiver uint32
+//	    Counter  uint64
+//	    Content  []byte
+//	}
+func (tun *Tun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+	tun.readMu.Lock()
+	defer tun.readMu.Unlock()
+	select {
+	case err := <-tun.errors:
+		return 0, err
+	default:
+		// regular packet buf
+		readBuf := bufs[0][offset:]
+		if tun.vnetHdr {
+			// packet buf prefixed by virtioNetHdr
+			readBuf = tun.readBuf[:]
 		}
-		offset -= virtioNetHdrLen
-	} else {
-		for i := range bufs {
-			tun.toWrite = append(tun.toWrite, i)
-		}
-	}
-	for _, i := range tun.toWrite {
-		n, err := tun.file.Write(bufs[i][offset:])
+		n, err := tun.file.Read(readBuf)
 		// EBADFD: bad file descriptor
 		if errors.Is(err, syscall.EBADFD) {
-			return total, os.ErrClosed
+			err = os.ErrClosed
 		}
 		if err != nil {
-			errs = errors.Join(errs, err)
+			return 0, err
+		}
+		if tun.vnetHdr {
+			// Coalesced packets prefixed by virtioNetHdr were read.
+			// handleVirtioRead will split them into bufs.
+			return handleVirtioRead(readBuf[:n], bufs, sizes, offset)
 		} else {
-			total += n
+			// one regular packet was read
+			sizes[0] = n
+			return 1, nil
 		}
 	}
-	return total, errs
 }
 
 // handleVirtioRead splits `in` into `bufs`, leaving offset
@@ -574,32 +621,48 @@ func handleVirtioRead(
 	return gsoSplit(in, hdr, bufs, sizes, offset, ipVersion == 6)
 }
 
-func (tun *Tun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
-	tun.readMu.Lock()
-	defer tun.readMu.Unlock()
-	select {
-	case err := <-tun.errors:
-		return 0, err
-	default:
-		readBuf := bufs[0][offset:]
-		if tun.vnetHdr {
-			readBuf = tun.readBuf[:]
-		}
-		n, err := tun.file.Read(readBuf)
-		// EBADFD: bad file descriptor
-		if errors.Is(err, syscall.EBADFD) {
-			err = os.ErrClosed
-		}
-		if err != nil {
+func (tun *Tun) Write(bufs [][]byte, offset int) (int, error) {
+	tun.writeMu.Lock()
+	defer func() {
+		tun.tcpGROTable.reset()
+		tun.udpGROTable.reset()
+		tun.writeMu.Unlock()
+	}()
+	var (
+		errs  error
+		total int
+	)
+	tun.toWrite = tun.toWrite[:0]
+	if tun.vnetHdr {
+		if err := handleGRO(
+			bufs,
+			offset,
+			tun.tcpGROTable,
+			tun.udpGROTable,
+			tun.udpGSO,
+			&tun.toWrite,
+		); err != nil {
 			return 0, err
 		}
-		if tun.vnetHdr {
-			return handleVirtioRead(readBuf[:n], bufs, sizes, offset)
-		} else {
-			sizes[0] = n
-			return 1, nil
+		offset -= virtioNetHdrLen
+	} else {
+		for i := range bufs {
+			tun.toWrite = append(tun.toWrite, i)
 		}
 	}
+	for _, i := range tun.toWrite {
+		n, err := tun.file.Write(bufs[i][offset:])
+		// EBADFD: bad file descriptor
+		if errors.Is(err, syscall.EBADFD) {
+			return total, os.ErrClosed
+		}
+		if err != nil {
+			errs = errors.Join(errs, err)
+		} else {
+			total += n
+		}
+	}
+	return total, errs
 }
 
 func (tun *Tun) File() *os.File {
@@ -784,30 +847,4 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 		return nil, err
 	}
 	return tun, nil
-}
-
-// CreateUnmonitoredTUNFromFD creates a Device from the provided file
-// descriptor.
-func CreateUnmonitoredTUNFromFD(fd int) (Device, string, error) {
-	if err := unix.SetNonblock(fd, true); err != nil {
-		return nil, "", err
-	}
-	// "/dev/tun" is for legacy compatibility?
-	file := os.NewFile(uintptr(fd), "/dev/tun")
-	tun := &Tun{
-		file:        file,
-		events:      make(chan Event, 5),
-		errors:      make(chan error, 5),
-		tcpGROTable: newTCPGROTable(),
-		udpGROTable: newUDPGROTable(),
-		toWrite:     make([]int, 0, conn.BatchSize),
-	}
-	name, err := tun.Name()
-	if err != nil {
-		return nil, "", err
-	}
-	if err = tun.initFromFlags(name); err != nil {
-		return nil, "", err
-	}
-	return tun, name, err
 }

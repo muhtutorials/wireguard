@@ -258,6 +258,7 @@ func (d *Device) RoutineReadFromTUN() {
 		// read packets
 		nPackets, err = d.tun.device.Read(bufs, sizes, offset)
 		for i := range nPackets {
+			// TODO: why do we need this check?
 			if sizes[i] < 1 {
 				continue
 			}

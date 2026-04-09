@@ -90,7 +90,7 @@ type pools struct {
 	quInItemsWithLock  *WaitPool
 	quOutItems         *WaitPool
 	quInItems          *WaitPool
-	// TODO: why is it not part of items?
+	// used by both quInItems and quOutItems
 	messageBufs *WaitPool
 }
 

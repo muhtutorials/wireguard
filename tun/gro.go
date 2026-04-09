@@ -1,4 +1,13 @@
-// GRO (Generic Receive Offload)
+// GSO (Generic Segmentation Offload):
+// Application combines several packets into one,
+// sends to kernel, kernel sends to NIC,
+// NIC splits one packet into standard several packets,
+// and sends them over the network.
+//
+// GRO Generic Receive Offload:
+// NIC combines multiple incoming from network packets
+// into one large packet.
+// Kernel delivers them as a single datagram to userspace.
 package tun
 
 import (

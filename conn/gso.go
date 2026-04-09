@@ -1,4 +1,4 @@
-// GSO: generic segmentation offload.
+// GSO (Generic Segmentation Offload):
 // Application combines several packets into one,
 // sends to kernel, kernel sends to NIC,
 // NIC splits one packet into standard several packets,
