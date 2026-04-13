@@ -65,7 +65,7 @@ const (
 	MessageResponseSize = 92
 	// size of cookie reply message
 	MessageCookieReplySize = 64
-	// size of data preceding content in transport message
+	// size of fields preceding content field in MessageTransport
 	// (uint32 + uint32 + uint64 = 16 byte)
 	MessageTransportHeaderSize = 16
 	// size of empty transport
@@ -81,7 +81,8 @@ const (
 const (
 	MessageTransportOffsetReceiver = 4
 	MessageTransportOffsetCounter  = 8
-	MessageTransportOffsetContent  = 16
+	// same as MessageTransportHeaderSize
+	MessageTransportOffsetContent = 16
 )
 
 var errMessageLenMismatch = errors.New("message length mismatch")

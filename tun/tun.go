@@ -79,7 +79,8 @@ type Tun struct {
 	events chan Event // device related events
 	// netlink is a communication mechanism
 	// between userspace and kernel
-	netlinkSock             int
+	netlinkSock int
+	// wraps `netlinkSock` in `rwcancel.RWCancel`
 	netlinkCancel           *rwcancel.RWCancel
 	hackListenerClosed      sync.Mutex
 	statusListenersShutdown chan struct{}
@@ -97,11 +98,10 @@ type Tun struct {
 	nameCache string
 	// cached error
 	nameErr error
-	readMu  sync.Mutex // readMu guards readBuf
+	readMu  sync.Mutex // guards readBuf
 	// if vnetHdr is true every read is prefixed by virtioNetHdr
 	readBuf [virtioNetHdrLen + 65535]byte
-	// writeMu guards toWrite, tcpGROTable
-	// TODO: does it guard udpGROTable?
+	// guards toWrite, tcpGROTable and udpGROTable
 	writeMu     sync.Mutex
 	toWrite     []int // bufs at indexes to write
 	tcpGROTable *tcpGROTable
@@ -141,10 +141,13 @@ func createNetlinkSocket() (int, error) {
 // routineNetlinkListener monitors IFF_RUNNING flag inside IfInfomsg.
 // IFF_RUNNING flag indicates whether a network interface has allocated
 // its resources and is ready to transmit and receive packets.
-// Then the method sends events through tun.events channel.
+// Then the method sends events through `tun.events` channel.
 func (tun *Tun) routineNetlinkListener() {
 	defer func() {
 		unix.Close(tun.netlinkSock)
+		// Blocks until routineHackListener returns,
+		// thus releasing the lock. Only after that
+		// we can close `tun.events` channel.
 		tun.hackListenerClosed.Lock()
 		close(tun.events)
 		tun.netlinkCancel.Close()
@@ -226,7 +229,7 @@ func (tun *Tun) routineNetlinkListener() {
 // routineHackListener continuously polls the TUN file descriptor
 // by attempting a zero-byte write to detect whether the interface
 // is administratively up or down, then sends corresponding
-// events through tun.events channel.
+// events through `tun.events` channel.
 // This is a hack to detect the administrative state (up/down)
 // of a TUN interface without requiring privileged operations
 // or complex netlink monitoring.
@@ -452,7 +455,7 @@ func (tun *Tun) nameSlow() (string, error) {
 //	for i := range items {
 //	    items[i] = d.NewQuOutItem()
 //	    bufs[i] = items[i].buf[:]
-//	},
+//	}
 //
 // where item is popped from `quOutItems` pool and
 // item.buf is popped from `messageBufs` pool.
@@ -501,42 +504,50 @@ func (tun *Tun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	}
 }
 
-// handleVirtioRead splits `in` into `bufs`, leaving offset
+// handleVirtioRead splits `readBuf` into `bufs`, leaving offset
 // bytes at the front of each buffer. It mutates sizes
 // to reflect the size of each element of `bufs`,
 // and returns the number of packets read.
 func handleVirtioRead(
-	in []byte,
+	// buf containing virtioNetHdr and coalesced packets
+	readBuf []byte,
 	bufs [][]byte,
 	sizes []int,
 	offset int,
 ) (int, error) {
+	// decode bytes from readBuf into hdr
 	var hdr virtioNetHdr
-	if err := hdr.decode(in); err != nil {
+	if err := hdr.decode(readBuf); err != nil {
 		return 0, err
 	}
-	in = in[virtioNetHdrLen:]
-	// VIRTIO_NET_HDR_GSO_NONE: no generic segmentation offloading (GSO)
-	// is being used for a network packet.
-	// As slice goes in, so it goes out!
+	// move the "cursor"
+	readBuf = readBuf[virtioNetHdrLen:]
+	// VIRTIO_NET_HDR_GSO_NONE:
+	// 	Generic segmentation offload (GSO) is not supported
+	// 	for network packets. No need to split them.
+	// 	As slice goes in, so it goes out!
 	if hdr.gsoType == unix.VIRTIO_NET_HDR_GSO_NONE {
 		// VIRTIO_NET_HDR_F_NEEDS_CSUM: packet needs checksum computation
 		if hdr.flags&unix.VIRTIO_NET_HDR_F_NEEDS_CSUM != 0 {
-			// This means CHECKSUM_PARTIAL in skb context. We are responsible
-			// for computing the checksum starting at hdr.csumStart and placing
-			// at hdr.csumOffset.
-			if err := gsoNoneChecksum(in, hdr.csumStart, hdr.csumOffset); err != nil {
+			// We are responsible for computing the checksum starting
+			// at hdr.csumStart and placing it at hdr.csumOffset.
+			if err := gsoNoneChecksum(
+				readBuf,
+				hdr.csumStart,
+				hdr.csumOffset,
+			); err != nil {
 				return 0, err
 			}
 		}
-		if len(in) > len(bufs[0][offset:]) {
+		if len(readBuf) > len(bufs[0][offset:]) {
 			return 0, fmt.Errorf(
-				"read len %d overflows bufs element len %d",
-				len(in),
+				"read length %d overflows bufs element length %d",
+				len(readBuf),
 				len(bufs[0][offset:]),
 			)
 		}
-		n := copy(bufs[0][offset:], in)
+		// one regular packet is read
+		n := copy(bufs[0][offset:], readBuf)
 		sizes[0] = n
 		return 1, nil
 	}
@@ -552,14 +563,14 @@ func handleVirtioRead(
 		hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_UDP_L4 {
 		return 0, fmt.Errorf("unsupported virtio GSO type: %d", hdr.gsoType)
 	}
-	// extracts IP version
-	ipVersion := in[0] >> 4
+	// extract IP version from packet
+	ipVersion := readBuf[0] >> 4
 	switch ipVersion {
 	case 4:
 		if hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_TCPV4 &&
 			hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_UDP_L4 {
 			return 0, fmt.Errorf(
-				"ip header version: %d, GSO type: %d",
+				"IP header version: %d, GSO type: %d",
 				ipVersion,
 				hdr.gsoType,
 			)
@@ -568,40 +579,44 @@ func handleVirtioRead(
 		if hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_TCPV6 &&
 			hdr.gsoType != unix.VIRTIO_NET_HDR_GSO_UDP_L4 {
 			return 0, fmt.Errorf(
-				"ip header version: %d, GSO type: %d",
+				"IP header version: %d, GSO type: %d",
 				ipVersion,
 				hdr.gsoType,
 			)
 		}
 	default:
-		return 0, fmt.Errorf("invalid ip header version: %d", ipVersion)
+		return 0, fmt.Errorf("invalid IP header version: %d", ipVersion)
 	}
 	// Don't trust hdr.hdrLen from the kernel as it can be equal to the length
 	// of the entire first packet when the kernel is handling it as part of a
 	// FORWARD path. Instead, parse the transport header length and add it onto
 	// csumStart, which is synonymous for IP header length.
 	if hdr.gsoType == unix.VIRTIO_NET_HDR_GSO_UDP_L4 {
-		hdr.hdrLen = hdr.csumStart + 8 // iphLen + udphLen (8)
+		hdr.hdrLen = hdr.csumStart + 8 // iphLen + udphLen
 	} else {
-		// `csumStart+12` is data offset field (header length)
-		if len(in) <= int(hdr.csumStart+12) {
+		// `csumStart+12` is offset of `data offset` field inside TCP header.
+		// `data offset` field is TCP header length.
+		if len(readBuf) <= int(hdr.csumStart+12) {
 			return 0, errors.New("packet is too short")
 		}
-		tcpHLen := uint16(in[hdr.csumStart+12] >> 4 * 4)
+		// Extract `data offset` field.
+		// Value stored in the `data offset` field must be multiplied
+		// by 4 to get the actual header length in bytes.
+		tcpHLen := uint16(readBuf[hdr.csumStart+12] >> 4 * 4)
 		if tcpHLen < 20 || tcpHLen > 60 {
-			// A TCP header must be between 20 and 60 bytes in length.
-			return 0, fmt.Errorf("tcp header len is invalid: %d", tcpHLen)
+			// TCP header must be between 20 and 60 bytes in length.
+			return 0, fmt.Errorf("TCP header length is invalid: %d", tcpHLen)
 		}
 		hdr.hdrLen = hdr.csumStart + tcpHLen
 	}
-	if len(in) < int(hdr.hdrLen) {
+	if len(readBuf) < int(hdr.hdrLen) {
 		return 0, fmt.Errorf(
 			"length of packet (%d) < virtioNetHdr.hdrLen (%d)",
-			len(in),
+			len(readBuf),
 			hdr.hdrLen,
 		)
 	}
-	// NOTE: redundant defensive programming?
+	// TODO: defensive programming?
 	if hdr.hdrLen < hdr.csumStart {
 		return 0, fmt.Errorf(
 			"virtioNetHdr.hdrLen (%d) < virtioNetHdr.csumStart (%d)",
@@ -610,29 +625,45 @@ func handleVirtioRead(
 		)
 	}
 	checksumAt := int(hdr.csumStart + hdr.csumOffset)
-	// check if checksum field is inside `in`
-	if checksumAt+1 >= len(in) {
+	// check if checksum field is inside `readBuf`
+	if checksumAt+1 >= len(readBuf) {
 		return 0, fmt.Errorf(
 			"end of checksum offset (%d) exceeds packet length (%d)",
 			checksumAt+1,
-			len(in),
+			len(readBuf),
 		)
 	}
-	return gsoSplit(in, hdr, bufs, sizes, offset, ipVersion == 6)
+	return gsoSplit(readBuf, hdr, bufs, sizes, offset, ipVersion == 6)
 }
 
+// Write is used by RoutineSequentialReceiver to write
+// requests to websites sent by peers.
+// bufs:
+// bufs := make([][]byte, 0, maxBatchSize)
+// bufs = append(bufs, item.buf[:MessageTransportOffsetContent+len(item.packet)])
+// item: created in RoutineReceiveIncoming.
+// offset: MessageTransportOffsetContent.
+// It's the size of data preceding Content field in
+// MessageTransport (uint32 + uint32 + uint64 = 16 byte):
+//
+//	type MessageTransport struct {
+//	    Type     uint32
+//	    Receiver uint32
+//	    Counter  uint64
+//	    Content  []byte
+//	}
 func (tun *Tun) Write(bufs [][]byte, offset int) (int, error) {
 	tun.writeMu.Lock()
 	defer func() {
+		tun.toWrite = tun.toWrite[:0]
 		tun.tcpGROTable.reset()
 		tun.udpGROTable.reset()
 		tun.writeMu.Unlock()
 	}()
 	var (
-		errs  error
 		total int
+		errs  error
 	)
-	tun.toWrite = tun.toWrite[:0]
 	if tun.vnetHdr {
 		if err := handleGRO(
 			bufs,
@@ -644,8 +675,12 @@ func (tun *Tun) Write(bufs [][]byte, offset int) (int, error) {
 		); err != nil {
 			return 0, err
 		}
+		// Move back `offset` by `virtioNetHdrLen` to write `virtioNetHdr`,
+		// which was encoded before packet in `handleGRO`.
 		offset -= virtioNetHdrLen
 	} else {
+		// GRO (coalescing of packets) is not supported.
+		// We write them as they are.
 		for i := range bufs {
 			tun.toWrite = append(tun.toWrite, i)
 		}
@@ -715,6 +750,91 @@ const (
 	tunUDPOffloads = unix.TUN_F_USO4 | unix.TUN_F_USO6
 )
 
+// CreateTUN creates a Device with the provided name and MTU.
+func CreateTUN(name string, mtu int) (Device, error) {
+	// O_RDWR: open for reading and writing.
+	// O_CLOEXEC: automatically close the file descriptor when exec is called.
+	fd, err := unix.Open(cloneDevicePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf(
+				"CreateTUN (%q) failed; %s does not exist",
+				name,
+				cloneDevicePath,
+			)
+		}
+		return nil, err
+	}
+	ifReq, err := unix.NewIfreq(name)
+	if err != nil {
+		return nil, err
+	}
+	// IFF_VNET_HDR enables the "tun status hack" via routineHackListener()
+	// where a null write will return EINVAL indicating the TUN is up.
+	// IFF_TUN: creates a layer 3 TUN device (IP packets).
+	// IFF_NO_PI: no packet information header. Without this flag,
+	// 	TUN/TAP prepends a 4-byte header to each packet:
+	// 	[flags (2 bytes)][proto (2 bytes)][packet data]
+	// IFF_VNET_HDR: enables virtio-net headers for hardware
+	// 	offloading. Required for TSO, GSO and checksum offloading.
+	ifReq.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
+	// TUNSETIFF: create/attach a TUN/TAP device.
+	if err = unix.IoctlIfreq(fd, unix.TUNSETIFF, ifReq); err != nil {
+		return nil, err
+	}
+	if err = unix.SetNonblock(fd, true); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	// open, ioctl, nonblock must happen prior to handing
+	// it to netpoll as below this line
+	file := os.NewFile(uintptr(fd), cloneDevicePath)
+	return CreateTUNFromFile(file, mtu)
+}
+
+// CreateTUNFromFile creates a Device from an os.File with the provided MTU.
+func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
+	tun := &Tun{
+		file:                    file,
+		events:                  make(chan Event, 5),
+		errors:                  make(chan error, 5),
+		statusListenersShutdown: make(chan struct{}),
+		tcpGROTable:             newTCPGROTable(),
+		udpGROTable:             newUDPGROTable(),
+		toWrite:                 make([]int, 0, conn.BatchSize),
+	}
+	name, err := tun.Name()
+	if err != nil {
+		return nil, err
+	}
+	if err = tun.initFromFlags(name); err != nil {
+		return nil, err
+	}
+	// start event listener
+	tun.index, err = getIfIndex(name)
+	if err != nil {
+		return nil, err
+	}
+	tun.netlinkSock, err = createNetlinkSocket()
+	if err != nil {
+		return nil, err
+	}
+	tun.netlinkCancel, err = rwcancel.New(tun.netlinkSock)
+	if err != nil {
+		unix.Close(tun.netlinkSock)
+		return nil, err
+	}
+	// unlocked in routineHackListener
+	tun.hackListenerClosed.Lock()
+	go tun.routineNetlinkListener()
+	go tun.routineHackListener()
+	if err = tun.setMTU(mtu); err != nil {
+		unix.Close(tun.netlinkSock)
+		return nil, err
+	}
+	return tun, nil
+}
+
 // initFromFlags checks if TUN supports hardware offloading
 func (tun *Tun) initFromFlags(name string) error {
 	rawConn, err := tun.file.SyscallConn()
@@ -763,88 +883,4 @@ func (tun *Tun) initFromFlags(name string) error {
 		return err
 	}
 	return err
-}
-
-// CreateTUN creates a Device with the provided name and MTU.
-func CreateTUN(name string, mtu int) (Device, error) {
-	// O_RDWR: open for reading and writing.
-	// O_CLOEXEC: automatically close the file descriptor when exec is called.
-	fd, err := unix.Open(cloneDevicePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf(
-				"CreateTUN (%q) failed; %s does not exist",
-				name,
-				cloneDevicePath,
-			)
-		}
-		return nil, err
-	}
-	ifReq, err := unix.NewIfreq(name)
-	if err != nil {
-		return nil, err
-	}
-	// IFF_VNET_HDR enables the "tun status hack" via routineHackListener()
-	// where a null write will return EINVAL indicating the TUN is up.
-	// IFF_TUN: creates a layer 3 TUN device (IP packets).
-	// IFF_NO_PI: no packet information header. Without this flag,
-	// 	TUN/TAP prepends a 4-byte header to each packet:
-	// 	[flags (2 bytes)][proto (2 bytes)][packet data]
-	// IFF_VNET_HDR: enables virtio-net headers for hardware
-	// 	offloading. Required for TSO, checksum offloading, GSO.
-	ifReq.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
-	// TUNSETIFF: create/attach a TUN/TAP device.
-	if err = unix.IoctlIfreq(fd, unix.TUNSETIFF, ifReq); err != nil {
-		return nil, err
-	}
-	if err = unix.SetNonblock(fd, true); err != nil {
-		unix.Close(fd)
-		return nil, err
-	}
-	// open, ioctl, nonblock must happen prior to handing
-	// it to netpoll as below this line
-	file := os.NewFile(uintptr(fd), cloneDevicePath)
-	return CreateTUNFromFile(file, mtu)
-}
-
-// CreateTUNFromFile creates a Device from an os.File with the provided MTU.
-func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
-	tun := &Tun{
-		file:                    file,
-		events:                  make(chan Event, 5),
-		errors:                  make(chan error, 5),
-		statusListenersShutdown: make(chan struct{}),
-		tcpGROTable:             newTCPGROTable(),
-		udpGROTable:             newUDPGROTable(),
-		toWrite:                 make([]int, 0, conn.BatchSize),
-	}
-	name, err := tun.Name()
-	if err != nil {
-		return nil, err
-	}
-	if err = tun.initFromFlags(name); err != nil {
-		return nil, err
-	}
-	// start event listener
-	tun.index, err = getIfIndex(name)
-	if err != nil {
-		return nil, err
-	}
-	tun.netlinkSock, err = createNetlinkSocket()
-	if err != nil {
-		return nil, err
-	}
-	tun.netlinkCancel, err = rwcancel.New(tun.netlinkSock)
-	if err != nil {
-		unix.Close(tun.netlinkSock)
-		return nil, err
-	}
-	tun.hackListenerClosed.Lock()
-	go tun.routineNetlinkListener()
-	go tun.routineHackListener() // cross namespace
-	if err = tun.setMTU(mtu); err != nil {
-		unix.Close(tun.netlinkSock)
-		return nil, err
-	}
-	return tun, nil
 }

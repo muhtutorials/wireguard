@@ -38,14 +38,7 @@ const (
 	tcpFlagACK uint8 = 0x10 // 16 (5th bit is set)
 )
 
-const (
-	// virtioNetHdrLen is the length in bytes of virtioNetHdr. This matches the
-	// shape of the C ABI for its kernel counterpart -- sizeof(virtio_net_hdr).
-	virtioNetHdrLen = int(unsafe.Sizeof(virtioNetHdr{}))
-)
-
-// virtioNetHdr is defined in the kernel in include/uapi/linux/virtio_net.h.
-// The kernel symbol is virtio_net_hdr.
+// virtioNetHdr is defined in linux kernel's `include/uapi/linux/virtio_net.h`.
 type virtioNetHdr struct {
 	// Bitmask of features/packet attributes:
 	// Bit 0 (VIRTIO_NET_HDR_F_NEEDS_CSUM): packet needs checksum calculation
@@ -60,7 +53,7 @@ type virtioNetHdr struct {
 	// VIRTIO_NET_HDR_GSO_TCPV6: TCP/IPv6 segmentation
 	// VIRTIO_NET_HDR_GSO_ECN: TCP with ECN (Explicit Congestion Notification)
 	gsoType uint8
-	// IP + TCP/UDP headers length
+	// IP header + TCP or UDP header length
 	hdrLen uint16
 	// Maximum Segment Size for GSO:
 	// Maximum size of each segment after segmentation
@@ -72,6 +65,10 @@ type virtioNetHdr struct {
 	// checksum field offset from csumStart
 	csumOffset uint16
 }
+
+// virtioNetHdrLen is the length in bytes of virtioNetHdr. This matches the
+// shape of the C ABI for its kernel counterpart - sizeof(virtio_net_hdr).
+const virtioNetHdrLen = int(unsafe.Sizeof(virtioNetHdr{}))
 
 func (v *virtioNetHdr) decode(b []byte) error {
 	if len(b) < virtioNetHdrLen {
@@ -93,7 +90,8 @@ func (v *virtioNetHdr) encode(b []byte) error {
 type tcpFlowKey struct {
 	srcAddr, dstAddr [16]byte
 	srcPort, dstPort uint16
-	// varying ack values should not be coalesced. Treat them as separate flows.
+	// Different ack values should not be coalesced.
+	// Treat them as separate flows.
 	rxAck uint32
 	isV6  bool
 }
@@ -144,15 +142,17 @@ func newTCPGROTable() *tcpGROTable {
 
 func (t *tcpGROTable) newItems() []tcpGROItem {
 	var items []tcpGROItem
+	// "pop" last element from `itemsPool` by indexing
+	// into it and reducing its length by one
 	items, t.itemsPool = t.itemsPool[len(t.itemsPool)-1], t.itemsPool[:len(t.itemsPool)-1]
 	return items
 }
 
 func (t *tcpGROTable) reset() {
-	for k, items := range t.itemsByFlow {
+	for key, items := range t.itemsByFlow {
 		items = items[:0]
 		t.itemsPool = append(t.itemsPool, items)
-		delete(t.itemsByFlow, k)
+		delete(t.itemsByFlow, key)
 	}
 }
 
@@ -274,15 +274,17 @@ func newUDPGROTable() *udpGROTable {
 
 func (u *udpGROTable) newItems() []udpGROItem {
 	var items []udpGROItem
+	// "pop" last element from `itemsPool` by indexing
+	// into it and reducing its length by one
 	items, u.itemsPool = u.itemsPool[len(u.itemsPool)-1], u.itemsPool[:len(u.itemsPool)-1]
 	return items
 }
 
 func (u *udpGROTable) reset() {
-	for k, items := range u.itemsByFlow {
+	for key, items := range u.itemsByFlow {
 		items = items[:0]
 		u.itemsPool = append(u.itemsPool, items)
-		delete(u.itemsByFlow, k)
+		delete(u.itemsByFlow, key)
 	}
 }
 
@@ -1053,7 +1055,6 @@ func handleGRO(
 	toWrite *[]int,
 ) error {
 	for i := range bufs {
-		// TODO: why is offset the same for all bufs?
 		if offset < virtioNetHdrLen || offset > len(bufs[i])-1 {
 			return errors.New("invalid offset")
 		}
@@ -1076,6 +1077,7 @@ func handleGRO(
 			}
 			fallthrough
 		case groResultTableInsert:
+			// TODO: check how it works with Write
 			*toWrite = append(*toWrite, i)
 		}
 	}
@@ -1086,7 +1088,7 @@ func handleGRO(
 
 // gsoSplit splits packets from `in` into `outBuffs`, writing the size of each
 // element into `sizes`. It returns the number of buffers populated, and/or an
-// error.
+// error. Used by handleVirtioRead.
 func gsoSplit(
 	in []byte,
 	hdr virtioNetHdr,
@@ -1183,15 +1185,25 @@ func gsoSplit(
 	return i, nil
 }
 
-func gsoNoneChecksum(in []byte, checksumStart, checksumOffset uint16) error {
+// gsoNoneChecksum only does checksum calculation
+// without packet splitting. Used by handleVirtioRead.
+func gsoNoneChecksum(
+	readBuf []byte,
+	checksumStart, // TCP/UDP header start (IP header length)
+	checksumOffset uint16, // checksum field offset from checksumStart
+) error {
 	// calculate checksum field index
 	checksumAt := checksumStart + checksumOffset
-	// The initial value at the checksum offset should be summed with the
-	// checksum we compute. This is typically the pseudo-header checksum.
-	initial := binary.BigEndian.Uint16(in[checksumAt:])
+	// The initial value at the checksum offset
+	// should be summed with the checksum we compute.
+	// This is typically the pseudo-header checksum.
+	initial := binary.BigEndian.Uint16(readBuf[checksumAt:])
 	// reset checksum
-	in[checksumAt], in[checksumAt+1] = 0, 0
+	readBuf[checksumAt], readBuf[checksumAt+1] = 0, 0
 	// new checksum
-	binary.BigEndian.PutUint16(in[checksumAt:], ^checksum(in[checksumStart:], uint64(initial)))
+	binary.BigEndian.PutUint16(
+		readBuf[checksumAt:],
+		^checksum(readBuf[checksumStart:], uint64(initial)),
+	)
 	return nil
 }
