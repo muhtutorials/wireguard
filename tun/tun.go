@@ -652,6 +652,10 @@ func handleVirtioRead(
 //	    Counter  uint64
 //	    Content  []byte
 //	}
+//
+// It's passed to the method so it can be used for encoding
+// virtioNetHdr, which is written to message header:
+// [MessageTransportHeaderSize(offset):Content(packet)]
 func (tun *Tun) Write(bufs [][]byte, offset int) (int, error) {
 	tun.writeMu.Lock()
 	defer func() {

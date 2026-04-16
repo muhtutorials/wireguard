@@ -19,7 +19,8 @@ An IPv4 packet header is 20 to 60 bytes long (usually 20 bytes without options).
 
 Field Descriptions (IPv4):
     Version (4 bits) – IP version number (4 for IPv4).
-    IHL (4 bits) – Internet Header Length in 32-bit words. Minimum is 5 (20 bytes). Max is 15 (60 bytes).
+    IHL (4 bits) – Internet Header Length in 32-bit words (should be
+    multiplied by 4 to get actual value). Minimum is 5 (20 bytes). Maximum is 15 (60 bytes).
     Type of Service (8 bits) – Originally for QoS (priority, delay, throughput, reliability).
         Now often used for DSCP (Differentiated Services Code Point) and ECN (Explicit Congestion Notification).
     Total Length (16 bits) – Total packet length in bytes (header + data). Max: 65,535 bytes.
@@ -125,7 +126,8 @@ TCP Header Fields:
     Destination Port (16 bits): Receiver's port
     Sequence Number (32 bits): Byte position in data stream
     Acknowledgment Number (32 bits): Next expected byte
-    Data Offset (4 bits): Header length in 32-bit words
+    Data Offset (4 bits): Header length in 32-bit words (should be
+    multiplied by 4 to get actual value).
     Control Flags (6 bits):
         URG: Urgent pointer valid
         ACK: Acknowledgment valid
@@ -138,3 +140,4 @@ TCP Header Fields:
     Urgent Pointer (16 bits): Points to urgent data
     Options (0-40 bytes): Variable options (MSS, window scaling, etc.)
     Data: Actual payload
+    TCP payload length = IP Total Length - IP header Length - TCP header Length
