@@ -102,8 +102,11 @@ type Tun struct {
 	// if vnetHdr is true every read is prefixed by virtioNetHdr
 	readBuf [virtioNetHdrLen + 65535]byte
 	// guards toWrite, tcpGROTable and udpGROTable
-	writeMu     sync.Mutex
-	toWrite     []int // bufs at indexes to write
+	writeMu sync.Mutex
+	// Indexes of bufs to write.
+	// Coalesced packets are copied into one common buf to create a "super"
+	// packet so their own bufs should be ignored during write operation.
+	toWrite     []int
 	tcpGROTable *tcpGROTable
 	udpGROTable *udpGROTable
 }
@@ -680,7 +683,7 @@ func (tun *Tun) Write(bufs [][]byte, offset int) (int, error) {
 			return 0, err
 		}
 		// Move back `offset` by `virtioNetHdrLen` to write `virtioNetHdr`,
-		// which was encoded before packet in `handleGRO`.
+		// which was encoded in front of packet in `handleGRO`.
 		offset -= virtioNetHdrLen
 	} else {
 		// GRO (coalescing of packets) is not supported.

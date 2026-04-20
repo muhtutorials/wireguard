@@ -552,7 +552,7 @@ const (
 	maxUint16         = 1<<16 - 1
 )
 
-// TODO: check whole algorithm of checksum calculation
+// checksumValid validates TCP/UDP checksum.
 func checksumValid(pkt []byte, iphLen, protocol uint8, isV6 bool) bool {
 	srcAddrAt := ipv4SrcAddrOffset
 	addrSize := 4
@@ -564,9 +564,49 @@ func checksumValid(pkt []byte, iphLen, protocol uint8, isV6 bool) bool {
 	dstAddr := pkt[srcAddrAt+addrSize : srcAddrAt+addrSize+addrSize]
 	// TCP/UDP packet length
 	totalLen := uint16(len(pkt) - int(iphLen))
-	// protocol arg is TCP or UDP
-	headerChecksum :=
-		pseudoHeaderChecksumNoFold(srcAddr, dstAddr, protocol, totalLen)
+	// protocol: TCP or UDP
+	headerChecksum := pseudoHeaderChecksumNoFold(
+		srcAddr,
+		dstAddr,
+		protocol,
+		totalLen,
+	)
+	// S = sum of all 16-bit words except the checksum field.
+	// C = checksum value stored in the packet (put there by sender).
+	// C = ^S (how checksum calculated).
+	// How checksum is validated:
+	// 1. Sum everything (including C).
+	// 2. Check if result is 0xFFFF (via ^result == 0).
+	//
+	// Simplified example with 4-bit words:
+	// [1010] [1100] [1000]
+	//    ↑      ↑      ↑
+	//  word1  word2  checksum(C)
+	//
+	// Step 1: Calculate S = word1 + word2 (with end-around carry)
+	//
+	// 1010 + 1100 = 10110
+	// ├─ Lower 4 bits: 0110
+	// ├─ Carry out: 1
+	// └─ Add carry back: 0110 + 0001 = 0111
+	//
+	// S = 0111
+	//
+	// Step 2: Calculate C = ^S
+	// C = ^0111 = 1000
+	//
+	// Step 3: Receiver sums all words
+	//
+	// 1010 + 1100 = 0111 (as calculated above)
+	// Now add checksum: 0111 + 1000 = 01111
+	// ├─ Lower 4 bits: 1111
+	// ├─ Carry out: 0 (since 0111+1000 = 1111, no carry)
+	// └─ No carry to add
+	//
+	// Total = 1111 (which is 0xFFFF in 16-bit, all ones)
+	//
+	// Step 4: Validate
+	// ^1111 = 0000 → VALID ✓
 	return ^checksum(pkt[iphLen:], headerChecksum) == 0
 }
 
@@ -601,6 +641,7 @@ func coalesceTCPPackets(
 	var pktHead []byte // packet that will be at the front
 	headersLen := item.iphLen + item.tcphLen
 	pktPayloadLen := len(pkt) - int(headersLen)
+	// [item(header+payload)+pkt(payload)]
 	newLen := len(bufs[item.bufsIndex][offset:]) + pktPayloadLen
 	// copy data
 	if mode == coalescePrepend {
@@ -610,6 +651,8 @@ func coalesceTCPPackets(
 		if cap(pkt) < newLen {
 			// We don't want to allocate a new underlying
 			// array if capacity is too small.
+			// pkt is inserted into the tcpGROTable as a new item
+			// and its buf's index added to toWrite.
 			return coalesceInsufficientCap
 		}
 		if pshSet {
@@ -629,18 +672,19 @@ func coalesceTCPPackets(
 			return coalescePktInvalidChecksum
 		}
 		item.seqNum = seqNum
-		extendBy := newLen - len(pktHead)
+		// extend pkt's buf by item's pkt(s) length without header
+		itemPayloadLen := newLen - len(pktHead)
 		bufs[bufsIndex] = append(
 			bufs[bufsIndex],
-			make([]byte, extendBy)...,
+			make([]byte, itemPayloadLen)...,
 		)
+		// copy to the end of pkt buf item's pkt(s) without header
 		copy(
 			bufs[bufsIndex][offset+len(pkt):],
 			bufs[item.bufsIndex][offset+int(headersLen):],
 		)
-		// Flip the slice headers in bufs as part of prepend.
+		// Swap bufs as part of prepend.
 		// The index of item is already being tracked for writing.
-		// TODO: Look into this later.
 		bufs[item.bufsIndex], bufs[bufsIndex] =
 			bufs[bufsIndex], bufs[item.bufsIndex]
 	} else {
@@ -667,16 +711,17 @@ func coalesceTCPPackets(
 		if pshSet {
 			// We are appending a segment with PSH set.
 			item.pshSet = pshSet
+			// set PSH flag
 			pktHead[item.iphLen+tcpFlagsOffset] |= tcpFlagPSH
 		}
-		extendBy := len(pkt) - int(headersLen)
 		bufs[item.bufsIndex] = append(
 			bufs[item.bufsIndex],
-			make([]byte, extendBy)...,
+			make([]byte, pktPayloadLen)...,
 		)
 		copy(bufs[item.bufsIndex][offset+len(pktHead):], pkt[headersLen:])
 	}
-	// TODO: Why is this allowed? It contradicts tcpPacketsCanCoalesce.
+	// Can only be true in case of prepend and
+	// `gsoSize > item.gsoSize && item.numMerged = 0`,
 	if gsoSize > item.gsoSize {
 		item.gsoSize = gsoSize
 	}
@@ -885,7 +930,8 @@ func tcpGRO(
 			}
 		}
 	}
-	// failed to coalesce with any other packets; store the item in the flow
+	// Failed to coalesce with any other packets.
+	// Store the item in the flow.
 	table.insert(
 		pkt,
 		srcAddrOffset,
@@ -993,7 +1039,8 @@ func udpGRO(
 			pktChecksumKnownInvalid = true
 		}
 	}
-	// failed to coalesce with any other packets; store the item in the flow
+	// Failed to coalesce with any other packets.
+	// Store the item in the flow.
 	table.insert(
 		pkt,
 		srcAddrOffset,
@@ -1029,11 +1076,11 @@ func applyTCPCoalesce(
 				// Recalculate the (IPv4) header checksum.
 				if item.key.isV6 {
 					hdr.gsoType = unix.VIRTIO_NET_HDR_GSO_TCPV6
-					// set IPv6 header payload length
+					// set IPv6 payload length field
 					binary.BigEndian.PutUint16(
 						pkt[4:],
 						uint16(len(pkt))-uint16(item.iphLen),
-					) // set new IPv6 header payload len
+					)
 				} else {
 					hdr.gsoType = unix.VIRTIO_NET_HDR_GSO_TCPV4
 					// set IPv4 header checksum field to 0
@@ -1127,7 +1174,6 @@ func applyUDPCoalesce(
 					// set IPv4 header checksum field
 					binary.BigEndian.PutUint16(pkt[10:], iphChecksum)
 				}
-				// TODO: why is there space reserved for virtioNetHdr?
 				if err := hdr.encode(
 					bufs[item.bufsIndex][offset-virtioNetHdrLen:],
 				); err != nil {
@@ -1264,7 +1310,6 @@ func handleGRO(
 			}
 			fallthrough
 		case groResultTableInsert:
-			// TODO: check how it works with Write
 			*toWrite = append(*toWrite, i)
 		}
 	}

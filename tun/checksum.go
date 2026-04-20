@@ -6,10 +6,40 @@ import (
 )
 
 func checksumNoFold(b []byte, initial uint64) uint64 {
+	// Big-Endian (network order):
+	// Number: 0x12345678
+	// Memory: [0x12] [0x34] [0x56] [0x78]
+	//          ^^^^^  ^^^^   ^^^^   ^^^^
+	//          most    ...    ...   least
+	//       significant          significant
+	//
+	// Little-Endian (x86, ARM, most PCs):
+	// Number: 0x12345678
+	// Memory: [0x78] [0x56] [0x34] [0x12]
+	//          ^^^^   ^^^^   ^^^^   ^^^^^
+	//          least   ...    ...   most
+	//       significant          significant
+	//
+	// `initial` is the starting checksum value.
+	// The reason for converting `initial` (a uint64) into
+	// []byte and then back into uint64 is to swap endianness
+	// from native endianness to big endian.
+	// The function checksumNoFold processes data using native
+	// endian (for performance on the host CPU), but the
+	// checksum algorithm itself requires values to be treated
+	// in big-endian order (network byte order).
+	// `initial` may have been computed in native endian
+	// order from previous calls.
+	// We convert to bytes using native endian:
+	// 	binary.NativeEndian.PutUint64(tmp, initial)
+	// Read back as big endian: binary.BigEndian.Uint64(tmp).
+	// This effectively performs an endianness conversion:
+	// 	If native = little endian (x86, ARM), the byte order gets reversed.
+	// 	If native = big endian, it's a no-op.
 	tmp := make([]byte, 8)
-	// initial is starting checksum value
 	binary.NativeEndian.PutUint64(tmp, initial)
 	ac := binary.BigEndian.Uint64(tmp)
+	// `0` or `1`
 	var carry uint64
 	for len(b) >= 128 {
 		ac, carry = bits.Add64(ac, binary.NativeEndian.Uint64(b[:8]), 0)
@@ -73,6 +103,11 @@ func checksumNoFold(b []byte, initial uint64) uint64 {
 		b = b[2:]
 	}
 	if len(b) == 1 {
+		// Convert a single remaining byte into a 16-bit value for
+		// checksum calculation by zero-padding the high byte.
+		// The checksum algorithm operates on 16-bit words (2 bytes at a time).
+		// When an odd number of bytes remains (exactly 1 byte left),
+		// it must be padded to 16 bits.
 		tmp := binary.NativeEndian.Uint16([]byte{b[0], 0})
 		ac, carry = bits.Add64(ac, uint64(tmp), 0)
 		ac += carry
@@ -81,25 +116,50 @@ func checksumNoFold(b []byte, initial uint64) uint64 {
 	return binary.BigEndian.Uint64(tmp)
 }
 
-// TODO: look into one's complement arithmetic
+// pseudoHeaderChecksumNoFold calculates IP header checksum.
+// It's called "pseudo" because not all header fields are
+// included in the calculation, only 4: source address,
+// destination address, protocol (TCP/UDP) and total length
+// (TCP/UDP packet length).
+func pseudoHeaderChecksumNoFold(
+	srcAddr,
+	dstAddr []byte,
+	protocol uint8,
+	totalLen uint16,
+) uint64 {
+	sum := checksumNoFold(srcAddr, 0)
+	sum = checksumNoFold(dstAddr, sum)
+	// In IP pseudo-headers for TCP/UDP checksum calculation
+	// (per RFC 768 for UDP and RFC 793 for TCP), the protocol
+	// field is one byte (e.g., 6 for TCP, 17 for UDP).
+	// However, the checksum algorithm operates on 16-bit
+	// words (two bytes at a time). When the protocol is promoted
+	// to a 16-bit value for checksum calculation:
+	//  - High byte (bits 15–8): 0
+	//  - Low byte (bits 7–0): protocol number
+	// TODO: The order differs from the one in `checksumNoFold`:
+	// 	binary.NativeEndian.Uint16([]byte{b[0], 0}).
+	// Not sure why.
+	sum = checksumNoFold([]byte{0, protocol}, sum)
+	tmp := make([]byte, 2)
+	// convert uint16 to []byte
+	binary.BigEndian.PutUint16(tmp, totalLen)
+	return checksumNoFold(tmp, sum)
+}
+
 func checksum(b []byte, initial uint64) uint16 {
 	ac := checksumNoFold(b, initial)
+	// Reduce a 64-bit accumulated sum down to a 16-bit final
+	// checksum as required by IP, TCP, and UDP protocols.
+	// The folding process repeatedly:
+	// 1. Shift right by 16 bits (ac >> 16) — take the "carry" bits above 16 bits.
+	// 2. Mask to lower 16 bits (ac & 0xffff) — keep the low 16 bits.
+	// 3. Add them together.
+	// Four iterations guarantee all high bits are folded in,
+	// even for the maximum possible sum.
 	ac = (ac >> 16) + (ac & 0xffff)
 	ac = (ac >> 16) + (ac & 0xffff)
 	ac = (ac >> 16) + (ac & 0xffff)
 	ac = (ac >> 16) + (ac & 0xffff)
 	return uint16(ac)
-}
-
-// pseudoHeaderChecksumNoFold calculates IP header checksum.
-// It's called "pseudo" because not all header fields are
-// included in the calculation (only 4). 
-func pseudoHeaderChecksumNoFold(srcAddr, dstAddr []byte, protocol uint8, totalLen uint16) uint64 {
-	sum := checksumNoFold(srcAddr, 0)
-	sum = checksumNoFold(dstAddr, sum)
-	// protocol is TCP or UDP
-	sum = checksumNoFold([]byte{0, protocol}, sum)
-	tmp := make([]byte, 2)
-	binary.BigEndian.PutUint16(tmp, totalLen)
-	return checksumNoFold(tmp, sum)
 }
