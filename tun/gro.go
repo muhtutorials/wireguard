@@ -395,7 +395,7 @@ const (
 // pktA and pktB are IP packets.
 func ipHeadersCanCoalesce(pktA, pktB []byte) bool {
 	// Make sure packets have at least 9 bytes of length,
-	// because of this `pktA[8] != pktB[8]` comparison.
+	// because of this comparison: `pktA[8] != pktB[8]`.
 	if len(pktA) < 9 || len(pktB) < 9 {
 		return false
 	}
@@ -433,7 +433,7 @@ func ipHeadersCanCoalesce(pktA, pktB []byte) bool {
 // tcpPacketsCanCoalesce evaluates if `pkt` can be coalesced
 // with the packet described by `item`. This function makes
 // considerations that match the kernel's GRO self tests,
-// which can be found in tools/testing/selftests/net/gro.c.
+// which can be found in "tools/testing/selftests/net/gro.c".
 func tcpPacketsCanCoalesce(
 	pkt []byte, // IP packet
 	iphLen,
@@ -524,7 +524,7 @@ func udpPacketsCanCoalesce(
 	pkt []byte, // IP packet
 	iphLen uint8,
 	gsoSize uint16,
-	// Last item in a udpFlow, which has the same key as pkt.
+	// Last item in the udpFlow, which has the same key as pkt.
 	item udpGROItem,
 	bufs [][]byte,
 	offset int,
@@ -684,7 +684,7 @@ func coalesceTCPPackets(
 			return coalescePktInvalidChecksum
 		}
 		item.seqNum = seqNum
-		// extend pkt's buf by item's payload
+		// extend pkt's buf by item's payload length
 		itemPayloadLen := newLen - len(pktHead)
 		bufs[pktBufsIndex] = append(
 			bufs[pktBufsIndex],
@@ -739,9 +739,7 @@ func coalesceTCPPackets(
 	}
 	// Can only be true in case of prepend and
 	// `gsoSize > item.gsoSize && item.numMerged = 0`,
-	if gsoSize > item.gsoSize {
-		item.gsoSize = gsoSize
-	}
+	item.gsoSize = max(item.gsoSize, gsoSize)
 	item.numMerged++
 	return coalesceSuccess
 }
@@ -820,8 +818,8 @@ func tcpGRO(
 		// A valid IPv4 or IPv6 packet will never exceed this.
 		return groResultNoop
 	}
-	// Extract IHL from IPv4 header, which
-	// is the 4 low bits in the 1st byte:
+	// Extract Internet Header Length field from IPv4 header,
+	// which is the 4 low bits in the 1st byte:
 	// 			0
 	//  0 1 2 3 4 5 6 7
 	// +-+-+-+-+-+-+-+-+
@@ -849,7 +847,7 @@ func tcpGRO(
 	}
 	// Extract Data Offset (header length) field,
 	// which is 13th byte in TCP header.
-	// The field occupies four high bits in the byte.
+	// The field occupies 4 high bits in the byte.
 	tcphLen := int((pkt[iphLen+12] >> 4) * 4)
 	// 20: TCP header size without options.
 	// 60: 20 + 40, where 40 is max options size
@@ -884,7 +882,7 @@ func tcpGRO(
 		pshSet = true
 	}
 	gsoSize := uint16(len(pkt) - iphLen - tcphLen)
-	// not a candidate if payload len is 0
+	// not a candidate if payload length is 0
 	if gsoSize < 1 {
 		return groResultNoop
 	}
@@ -990,8 +988,8 @@ func udpGRO(
 		// A valid IPv4 or IPv6 packet will never exceed this.
 		return groResultNoop
 	}
-	// Extract IHL from IPv4 header, which
-	// is the 4 low bits in the 1st byte:
+	// Extract Internet Header Length field from IPv4 header,
+	// which is the 4 low bits in the 1st byte:
 	// 			0
 	//  0 1 2 3 4 5 6 7
 	// +-+-+-+-+-+-+-+-+
@@ -1025,7 +1023,7 @@ func udpGRO(
 		}
 	}
 	gsoSize := uint16(len(pkt) - iphLen - udphLen)
-	// not a candidate if payload len is 0
+	// not a candidate if payload length is 0
 	if gsoSize < 1 {
 		return groResultNoop
 	}
@@ -1216,7 +1214,7 @@ func applyUDPCoalesce(
 						uint16(len(pkt))-uint16(item.iphLen),
 					)
 				} else {
-					// set new Total Length
+					// set new IPv4 Total Length
 					binary.BigEndian.PutUint16(pkt[2:], uint16(len(pkt)))
 					// Set IPv4 Header Checksum field to 0. It needs
 					// to be empty before header checksum calculation.
@@ -1284,7 +1282,7 @@ const (
 )
 
 func groCandidate(pkt []byte, canUDPGRO bool) groCandidateType {
-	// min IP header length (20) plus UDP header length (8)
+	// minimum IP header length (20) plus UDP header length (8)
 	if len(pkt) < 28 {
 		return notGROCandidate
 	}
@@ -1390,11 +1388,12 @@ func gsoSplit(
 	if !isV6 {
 		srcAddrOffset = ipv4SrcAddrOffset
 		addrLen = 4
-		readBuf[10], readBuf[11] = 0, 0 // clear IPv4 checksum
+		// clear IPv4 Header Checksum field
+		readBuf[10], readBuf[11] = 0, 0
 	}
 	// TCP or UDP checksum field offset
 	checksumAt := int(hdr.csumStart + hdr.csumOffset)
-	// clear TCP/UDP checksum
+	// clear TCP or UDP checksum
 	readBuf[checksumAt], readBuf[checksumAt+1] = 0, 0
 	var (
 		firstSeq uint32
@@ -1403,7 +1402,7 @@ func gsoSplit(
 	if hdr.gsoType == unix.VIRTIO_NET_HDR_GSO_TCPV4 ||
 		hdr.gsoType == unix.VIRTIO_NET_HDR_GSO_TCPV6 {
 		protocol = unix.IPPROTO_TCP
-		// extract Sequence Number from TCP header
+		// extract Sequence Number field from TCP header
 		firstSeq = binary.BigEndian.Uint32(readBuf[hdr.csumStart+4:])
 	} else {
 		protocol = unix.IPPROTO_UDP
@@ -1426,7 +1425,7 @@ func gsoSplit(
 			// For IPv4 we are responsible for incrementing the
 			// Identification field, updating the Total Length
 			// field, and recalculating the header checksum.
-			// If i = 0, then no need to update identification field
+			// If i = 0, then no need to update Identification field
 			// because it does not change.
 			if i > 0 {
 				id := binary.BigEndian.Uint16(pkt[4:])
@@ -1434,10 +1433,10 @@ func gsoSplit(
 				id += 1
 				binary.BigEndian.PutUint16(pkt[4:], id)
 			}
-			// write Total Length field
+			// set Total Length field
 			binary.BigEndian.PutUint16(pkt[2:], uint16(pktLen))
 			ipv4Checksum := ^checksum(pkt[:iphLen], 0)
-			// write Header Checksum field
+			// set Header Checksum field
 			binary.BigEndian.PutUint16(pkt[10:], ipv4Checksum)
 		} else {
 			// For IPv6 we are responsible for updating the Payload Length field.
@@ -1471,7 +1470,6 @@ func gsoSplit(
 		}
 		// payload
 		copy(pkt[hdr.hdrLen:], readBuf[nextSegmentDataStart:nextSegmentEnd])
-		// transport checksum
 		transportHeaderLen := int(hdr.hdrLen - hdr.csumStart)
 		// TCP/UDP packet length
 		transportLen := uint16(transportHeaderLen + segmentDataLen)
@@ -1487,7 +1485,7 @@ func gsoSplit(
 			pkt[hdr.csumStart:pktLen],
 			transportChecksumNoFold,
 		)
-		// write TCP/UDP Checksum field
+		// set TCP/UDP Checksum field
 		binary.BigEndian.PutUint16(
 			pkt[hdr.csumStart+hdr.csumOffset:],
 			transportChecksum,
@@ -1512,9 +1510,9 @@ func gsoNoneChecksum(
 	// The pseudo header doesn't change when splitting
 	// packets. Computing it once saves work.
 	initial := binary.BigEndian.Uint16(readBuf[checksumAt:])
-	// reset checksum
-	binary.BigEndian.PutUint16(readBuf[checksumAt:], 0)
-	// put new checksum
+	// clear checksum
+	readBuf[checksumAt], readBuf[checksumAt+1] = 0, 0
+	// set new checksum
 	binary.BigEndian.PutUint16(
 		readBuf[checksumAt:],
 		^checksum(readBuf[checksumStart:], uint64(initial)),

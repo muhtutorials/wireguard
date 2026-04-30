@@ -14,50 +14,56 @@ const (
 	BatchSize = 128
 )
 
-// A ReceiveFunc receives at least one packet from the network and writes them
-// into packets. On a successful read it returns the number of elements of
-// sizes, packets, and endpoints that should be evaluated. Some elements of
-// sizes may be zero, and callers should ignore them. Callers must pass a sizes
-// and eps slice with a length greater than or equal to the length of packets.
-// These lengths must not exceed the length of the associated Bind.BatchSize().
-type ReceiveFunc func(packets [][]byte, sizes []int, eps []Endpoint) (n int, err error)
+// ReceiveFunc receives at least one packet from the network
+// and writes them into `packets`. On a successful read it
+// returns the number of elements of `packets`, `sizes`, and
+// `endpoints` that should be evaluated. Some elements of
+// `sizes` may be zero, and callers should ignore them.
+// Callers must pass a `sizes` and `endpoints` slice with a
+// length greater than or equal to the length of `packets`.
+// These lengths must not exceed the length of the associated
+// `Bind.BatchSize()`.
+type ReceiveFunc func(
+	packets [][]byte,
+	sizes []int,
+	endpoints []Endpoint,
+) (n int, err error)
 
-// A Bind listens on a port for both IPv6 and IPv4 UDP traffic.
-//
-// A Bind interface may also be a PeekLookAtSocketFd or BindSocketToInterface,
-// depending on the platform-specific implementation.
+// Bind listens on a port for both IPv6 and IPv4 UDP traffic.
 type Bind interface {
-	// Open puts the Bind into a listening state on a given port and reports the actual
-	// port that it bound to. Passing zero results in a random selection.
-	// fns is the set of functions that will be called to receive packets.
+	// Open puts the Bind into a listening state on a given
+	// port and reports the actual port that it bound to.
+	// Passing zero results in a random selection. `fns` is the
+	// set of functions that will be called to receive packets.
 	Open(port uint16) (fns []ReceiveFunc, actualPort uint16, err error)
 	// Close closes the Bind listener.
-	// All fns returned by Open must return net.ErrClosed after a call to Close.
+	// All `fns` returned by `Open` must return
+	// `net.ErrClosed` after a call to `Close`.
 	Close() error
 	// SetMark sets the mark for each packet sent through this Bind.
 	// This mark is passed to the kernel as the socket option SO_MARK.
 	SetMark(mark uint32) error
-	// Send writes one or more packets in bufs to address ep. The length of
-	// bufs must not exceed BatchSize().
+	// Send writes one or more packets in bufs to address ep.
+	// The length of bufs must not exceed BatchSize().
 	Send(bufs [][]byte, ep Endpoint) error
 	// ParseEndpoint creates a new endpoint from a string.
 	ParseEndpoint(s string) (Endpoint, error)
 	// BatchSize is the number of buffers expected to be passed to
-	// the ReceiveFuncs, and the maximum expected to be passed to SendBatch.
+	// ReceiveFuncs, and the maximum expected to be passed to SendBatch.
 	BatchSize() int
 }
 
-// An Endpoint maintains the source/destination caching for a peer.
+// Endpoint maintains the source/destination caching for a peer.
 //
-//	dst: the remote address of a peer ("endpoint" in uapi terminology)
 //	src: the local address from which datagrams originate going to the peer
+//	dst: the remote address of a peer ("endpoint" in uapi terminology)
 type Endpoint interface {
-	ClearSrc()           // clears the source address
+	SrcIP() netip.Addr
+	DstIP() netip.Addr
 	SrcToString() string // returns the local source address (IP:port)
 	DstToString() string // returns the destination address (IP:port)
 	DstToBytes() []byte  // used for mac2 cookie calculations
-	SrcIP() netip.Addr
-	DstIP() netip.Addr
+	ClearSrc()           // clears the source address
 }
 
 var (
