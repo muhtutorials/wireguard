@@ -52,7 +52,9 @@ const (
 )
 
 const (
-	MessageInitiationType  = 1
+	// handshake initiation
+	MessageInitiationType = 1
+	// handshake response
 	MessageResponseType    = 2
 	MessageCookieReplyType = 3
 	MessageTransportType   = 4

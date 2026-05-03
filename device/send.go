@@ -133,7 +133,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	}
 	buf := make([]byte, MessageInitiationSize)
 	_ = handshakeInit.marshal(buf)
-	peer.cookieGenerator.AddMacs(buf)
+	peer.cookieGenerator.AddMACs(buf)
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 	if err = peer.SendBufs([][]byte{buf}); err != nil {
@@ -166,7 +166,7 @@ func (peer *Peer) SendHandshakeResponse() error {
 	}
 	buf := make([]byte, MessageResponseSize)
 	_ = handshakeResp.marshal(buf)
-	peer.cookieGenerator.AddMacs(buf)
+	peer.cookieGenerator.AddMACs(buf)
 	if err = peer.BeginSymmetricSession(); err != nil {
 		peer.device.log.Errorf(
 			"%v - Failed to derive keypair: %v",

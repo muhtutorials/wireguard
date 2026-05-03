@@ -262,7 +262,7 @@ func (d *Device) RoutineHandshake(id int) {
 					"Receiving cookie response from %s",
 					item.endpoint.DstToString(),
 				)
-				// TODO: Who consumes it? Client or server?
+				// consumed by client
 				if !peer.cookieGenerator.ConsumeReply(&reply) {
 					d.log.Verbosef("Could not decrypt invalid cookie response")
 				}

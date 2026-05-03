@@ -60,7 +60,7 @@ type timers struct {
 
 // NewPeer is used by handlePublicKeyLine method to create
 // a new peer by providing a public key via IPC.
-func (d *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
+func (d *Device) NewPeer(pub NoisePublicKey) (*Peer, error) {
 	if d.isClosed() {
 		return nil, errors.New("device closed")
 	}
@@ -79,17 +79,17 @@ func (d *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	peer.qus.staged = make(chan *QuOutItemsWithLock, QuStagedSize)
 	peer.qus.out = newQuOutFlush(d)
 	peer.qus.in = newQuInFlush(d)
-	peer.cookieGenerator.Init(pk)
+	peer.cookieGenerator.Init(pub)
 	// map public key
-	_, ok := d.peers.val[pk]
+	_, ok := d.peers.val[pub]
 	if ok {
 		return nil, errors.New("adding existing peer")
 	}
 	// pre-compute DH
 	handshake := &peer.handshake
 	handshake.Lock()
-	handshake.precomputedSharedSecret, _ = d.keys.privateKey.sharedSecret(pk)
-	handshake.remoteStatic = pk
+	handshake.precomputedSharedSecret, _ = d.keys.privateKey.sharedSecret(pub)
+	handshake.remoteStatic = pub
 	handshake.Unlock()
 	// reset endpoint
 	peer.endpoint.Lock()
@@ -99,7 +99,7 @@ func (d *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	// init timers
 	peer.timersInit()
 	// add peer
-	d.peers.val[pk] = peer
+	d.peers.val[pub] = peer
 	return peer, nil
 }
 
