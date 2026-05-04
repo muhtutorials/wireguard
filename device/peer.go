@@ -234,7 +234,7 @@ func (peer *Peer) ZeroAndFlushAll() {
 	// clear handshake state
 	handshake := &peer.handshake
 	handshake.Lock()
-	device.indexTable.Delete(handshake.localIndex)
+	device.sessions.Delete(handshake.localIndex)
 	handshake.Clear()
 	handshake.Unlock()
 	peer.FlushStagedPackets()
@@ -243,7 +243,7 @@ func (peer *Peer) ZeroAndFlushAll() {
 func (peer *Peer) ExpireCurrentKeypairs() {
 	handshake := &peer.handshake
 	handshake.Lock()
-	peer.device.indexTable.Delete(handshake.localIndex)
+	peer.device.sessions.Delete(handshake.localIndex)
 	handshake.Clear()
 	// see Start method for explanation
 	peer.handshake.lastSentHandshake = time.Now().Add(-(RekeyTimeout + time.Second))

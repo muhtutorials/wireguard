@@ -100,7 +100,12 @@ var (
 // we can treat these as a 32-bit unsigned int (for now)
 
 type MessageInitiation struct {
-	Type      uint32
+	Type uint32
+	// Random 32-bit index which initiator generates
+	// with SessionMap.NewIndexForHandshake. It identifies
+	// this specific handshake. Used in handshake response
+	// as `receiver` field, so initiator can identify to
+	// which handshake this response belongs.
 	Sender    uint32
 	Ephemeral NoisePublicKey
 	Static    [NoisePublicKeySize + chacha20poly1305.Overhead]byte
@@ -186,7 +191,7 @@ type MessageTransport struct {
 	// This index is a much smaller and more efficient way
 	// to reference the correct key for a session than sending
 	// the full public key with every data packet.
-	Receiver uint32
+	Receiver uint32 // session index
 	Counter  uint64
 	Content  []byte
 }
@@ -229,13 +234,15 @@ type Handshake struct {
 	// with peer beforehand like peer's key pair.
 	presharedKey   NoisePresharedKey
 	localEphemeral NoisePrivateKey // ephemeral secret key
-	// random number assigned to a received handshake
-	localIndex  uint32
-	remoteIndex uint32 // index for sending
+	// Random number assigned to a received handshake.
+	// Used for session retrieval.
+	localIndex uint32
+	// sender from handshake initiation
+	remoteIndex uint32
 	// peer's static public key
 	remoteStatic              NoisePublicKey
-	remoteEphemeral           NoisePublicKey           // ephemeral public key
-	precomputedSharedSecret   [NoisePublicKeySize]byte // precomputed shared secret
+	remoteEphemeral           NoisePublicKey
+	precomputedSharedSecret   [NoisePublicKeySize]byte
 	lastTimestamp             tai64n.Timestamp
 	lastInitiationConsumption time.Time
 	lastSentHandshake         time.Time
@@ -320,13 +327,13 @@ func (d *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, error)
 	timestamp := tai64n.Now()
 	aead, _ = chacha20poly1305.New(key[:])
 	aead.Seal(msg.Timestamp[:0], ZeroNonce[:], timestamp[:], hs.hash[:])
-	// assign index
-	d.indexTable.Delete(hs.localIndex)
-	msg.Sender, err = d.indexTable.NewIndexForHandshake(peer, hs)
+	// assign session index
+	d.sessions.Delete(hs.localIndex)
+	hs.localIndex, err = d.sessions.NewIndexForHandshake(peer, hs)
 	if err != nil {
 		return nil, err
 	}
-	hs.localIndex = msg.Sender
+	msg.Sender = hs.localIndex
 	hs.mixHash(msg.Timestamp[:])
 	hs.state = handshakeInitiationCreated
 	return &msg, nil
@@ -423,10 +430,10 @@ func (d *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error) {
 	if hs.state != handshakeInitiationConsumed {
 		return nil, errors.New("handshake initiation must be consumed first")
 	}
-	// assign index
+	// assign session index
 	var err error
-	d.indexTable.Delete(hs.localIndex)
-	hs.localIndex, err = d.indexTable.NewIndexForHandshake(peer, hs)
+	d.sessions.Delete(hs.localIndex)
+	hs.localIndex, err = d.sessions.NewIndexForHandshake(peer, hs)
 	if err != nil {
 		return nil, err
 	}
@@ -475,8 +482,8 @@ func (d *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 		return nil
 	}
 	// get handshake by receiver
-	index := d.indexTable.Get(msg.Receiver)
-	hs := index.handshake
+	session := d.sessions.Get(msg.Receiver)
+	hs := session.handshake
 	if hs == nil {
 		return nil
 	}
@@ -541,7 +548,7 @@ func (d *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 	hs.Unlock()
 	setZero(hash[:])
 	setZero(chainKey[:])
-	return index.peer
+	return session.peer
 }
 
 // Derives a new keypair from the current handshake state.
@@ -594,7 +601,8 @@ func (peer *Peer) BeginSymmetricSession() error {
 	keypair.localIndex = peer.handshake.localIndex
 	keypair.remoteIndex = peer.handshake.remoteIndex
 	// remap index
-	d.indexTable.SwapIndexForKeypair(hs.localIndex, keypair)
+	// TODO: look into it
+	d.sessions.SwapIndexForKeypair(hs.localIndex, keypair)
 	hs.localIndex = 0
 	// rotate key pairs
 	keypairs := &peer.keypairs

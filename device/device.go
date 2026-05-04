@@ -27,7 +27,7 @@ type Device struct {
 	// allowed IPs
 	router Router
 	// connects receiver to peer, handshake and keypair
-	indexTable    IndexTable
+	sessions      SessionMap
 	pools         pools
 	qus           deviceQus
 	cookieChecker CookieChecker
@@ -113,7 +113,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	d.tun.mtu.Store(int32(mtu))
 	d.peers.val = make(map[NoisePublicKey]*Peer)
 	d.rateLimiter.val.Init()
-	d.indexTable.Init()
+	d.sessions.Init()
 	d.InitPools()
 	// create queues
 	d.qus.handshake = newQuHandshake()

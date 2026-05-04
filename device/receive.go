@@ -131,8 +131,8 @@ func (d *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.ReceiveFunc)
 				receiver := binary.LittleEndian.Uint32(
 					packet[MessageTransportOffsetReceiver:MessageTransportOffsetCounter],
 				)
-				index := d.indexTable.Get(receiver)
-				keypair := index.keypair
+				session := d.sessions.Get(receiver)
+				keypair := session.keypair
 				if keypair == nil {
 					continue
 				}
@@ -141,7 +141,7 @@ func (d *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.ReceiveFunc)
 					continue
 				}
 				// create work element
-				peer := index.peer
+				peer := session.peer
 				item := d.GetQuInItem()
 				item.buf = arrBufs[i]
 				item.packet = packet
@@ -252,17 +252,17 @@ func (d *Device) RoutineHandshake(id int) {
 				goto skip
 			}
 			// get peer from index
-			index := d.indexTable.Get(reply.Receiver)
-			if index.peer == nil {
+			session := d.sessions.Get(reply.Receiver)
+			if session.peer == nil {
 				goto skip
 			}
 			// consume reply
-			if peer := index.peer; peer.isRunning.Load() {
+			if peer := session.peer; peer.isRunning.Load() {
 				d.log.Verbosef(
 					"Receiving cookie response from %s",
 					item.endpoint.DstToString(),
 				)
-				// consumed by client
+				// consumed by recipient of cookie
 				if !peer.cookieGenerator.ConsumeReply(&reply) {
 					d.log.Verbosef("Could not decrypt invalid cookie response")
 				}

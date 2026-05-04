@@ -50,6 +50,6 @@ func (k *Keypairs) Current() *Keypair {
 
 func (d *Device) DeleteKeypair(key *Keypair) {
 	if key != nil {
-		d.indexTable.Delete(key.localIndex)
+		d.sessions.Delete(key.localIndex)
 	}
 }

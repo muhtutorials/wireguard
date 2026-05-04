@@ -477,7 +477,8 @@ func (d *Device) RoutineEncryption(id int) {
 			// TODO: why are firt 4 bytes not written to?
 			binary.LittleEndian.PutUint64(nonce[4:], item.nonce)
 			// Seal appends the encrypted message to the header.
-			// `item.buf` is reused here, encrypted message is saved to the rest of the buf.
+			// `item.buf` is reused here, encrypted message is
+			// saved to the rest of the buf.
 			// (item.buf[:MessageTransportHeaderSize] + encrypted message).
 			// And then saves the encrypted message to `item.packet`.
 			// Whole operation has zero allocations.
@@ -493,10 +494,12 @@ func (d *Device) RoutineEncryption(id int) {
 	}
 }
 
+// RoutineSequentialSender sends ecrypted packets
+// to the peer via UDP connection.
 func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
-	// NOTE: lock is not released here because items are put back into pool
-	// after use and then when they are taken again from the pool mutex is
-	// initialized again.
+	// NOTE: lock is not released here because items are put
+	// back into the pool after use and then when they are
+	// taken again from the pool a new mutex is created.
 	device := peer.device
 	defer func() {
 		// without defer, if Done() panicked, the log message wouldn't be printed
