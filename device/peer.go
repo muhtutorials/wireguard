@@ -166,15 +166,15 @@ func (peer *Peer) Start() {
 	peer.timersStart()
 	device.flushQuOut(peer.qus.out)
 	device.flushQuIn(peer.qus.in)
-	// Use the device batch size, not the bind batch size, as the device size is
-	// the size of the batch pools.
+	// Use the device batch size, not the bind batch size,
+	// as the device size is the size of the batch pools.
 	batchSize := peer.device.BatchSize()
-	go peer.RoutineSequentialSender(batchSize)
-	go peer.RoutineSequentialReceiver(batchSize)
+	go peer.RoutineSendToPeers(batchSize)
+	go peer.RoutineSendToInternet(batchSize)
 	peer.isRunning.Store(true)
 }
 
-func (peer *Peer) SendBufs(bufs [][]byte) error {
+func (peer *Peer) Send(bufs [][]byte) error {
 	peer.device.net.RLock()
 	defer peer.device.net.RUnlock()
 	if peer.device.isClosed() {
@@ -250,13 +250,13 @@ func (peer *Peer) ExpireCurrentKeypairs() {
 	handshake.Unlock()
 	keypairs := &peer.keypairs
 	keypairs.Lock()
+	defer keypairs.Unlock()
 	if keypairs.current != nil {
 		keypairs.current.sendNonce.Store(RejectAfterMessages)
 	}
 	if next := keypairs.next.Load(); next != nil {
 		next.sendNonce.Store(RejectAfterMessages)
 	}
-	keypairs.Unlock()
 }
 
 func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {

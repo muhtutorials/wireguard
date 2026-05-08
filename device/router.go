@@ -1,4 +1,4 @@
-// This trie data structures determine which peer
+// This trie data structure determines which peer
 // should handle traffic for a given IP address.
 package device
 
@@ -13,9 +13,10 @@ import (
 	"unsafe"
 )
 
-// Parent indirection. Used node removal optimization.
+// Parent indirection. Used for node removal optimization.
 type parent struct {
-	child      **node
+	child **node
+	// either 0 or 1 (left or right child)
 	childIndex uint8
 }
 

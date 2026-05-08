@@ -92,7 +92,7 @@ func newQuOutFlush(d *Device) *quOutFlush {
 	q := &quOutFlush{
 		c: make(chan *QuOutItemsWithLock, QuOutSize),
 	}
-	// SetFinalizer is analagous to drop method in Rust
+	// NOTE: SetFinalizer is analagous to drop method in Rust
 	runtime.SetFinalizer(q, d.flushQuOut)
 	return q
 }

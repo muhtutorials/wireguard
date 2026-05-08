@@ -12,6 +12,23 @@ import (
 	"github.com/muhtutorials/wireguard/tun"
 )
 
+// The task of assigning the tunnel IP address is delegated to external
+// utilities like `ifconfig` or `ip`. The project's official
+// documentation explicitly outlines this workflow:
+// 	1) Create the Interface: run `wireguard wg0`.
+//  This creates the interface but leaves it without an IP address.
+// 	2) Assign the IP Address: use a standard command
+//  like `ip address add dev wg0 10.0.0.2/24` to assign
+//  the 10.0.0.2 address to the `wg0` interface.
+//  3) Configure WireGuard: use the wg utility to set the private key,
+//  listen port, and peers.
+//  4) Activate the Interface: bring the interface up with
+//  `ip link set up dev wg0`.
+// After this step, the operating system's network stack knows that
+// any packet with the destination 10.0.0.2 should be routed to
+// the wg0 TUN device. Wireguard simply reads the raw IP packets
+// from this device.
+
 // server gets an encrypted message from the bind, decrypts it,
 // sends it via TUN to the website, then reads the response from TUN,
 // encrypts it, and sends it back to the peer via bind
@@ -122,10 +139,10 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	d.closed = make(chan struct{})
 	d.log = logger
 	// start workers
-	cpus := runtime.NumCPU()
+	numCPU := runtime.NumCPU()
 	d.state.stopping.Wait()
-	d.qus.encryption.wg.Add(cpus) // one for each RoutineHandshake
-	for i := range cpus {
+	d.qus.encryption.wg.Add(numCPU) // one for each RoutineHandshake
+	for i := range numCPU {
 		go d.RoutineHandshake(i + 1)
 		go d.RoutineEncryption(i + 1)
 		go d.RoutineDecryption(i + 1)
@@ -133,7 +150,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	d.state.stopping.Add(1)    // RoutineReadFromTUN
 	d.qus.encryption.wg.Add(1) // RoutineReadFromTUN
 	go d.RoutineTUNEventReader()
-	go d.RoutineReadFromTUN()
+	go d.RoutineReceiveFromInternet()
 	return d
 }
 
@@ -354,25 +371,6 @@ func removePeerLocked(device *Device, peer *Peer, key NoisePublicKey) {
 	delete(device.peers.val, key)
 }
 
-// SendKeepalives sends keepalives to peers with current keypair
-func (d *Device) SendKeepalives() {
-	if !d.isUp() {
-		return
-	}
-	d.peers.RLock()
-	defer d.peers.RUnlock()
-	for _, peer := range d.peers.val {
-		peer.keypairs.RLock()
-		sendKeepalive := peer.keypairs.current != nil &&
-			!peer.keypairs.current.createdAt.Add(RejectAfterTime).Before(time.Now())
-		peer.keypairs.RUnlock()
-		// current is not nil and RejectAfterTime hasn't passed yet
-		if sendKeepalive {
-			peer.SendKeepalive()
-		}
-	}
-}
-
 func (d *Device) Close() {
 	d.state.Lock()
 	defer d.state.Unlock()
@@ -499,7 +497,7 @@ func (d *Device) BindUpdate() error {
 	d.qus.decryption.wg.Add(len(recvFns))
 	batchSize := nt.bind.BatchSize()
 	for _, fn := range recvFns {
-		go d.RoutineReceiveIncoming(batchSize, fn)
+		go d.RoutineReceiveFromPeers(batchSize, fn)
 	}
 	d.log.Verbosef("UDP bind has been updated")
 	return nil

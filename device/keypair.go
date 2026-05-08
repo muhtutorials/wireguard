@@ -13,15 +13,22 @@ import (
  * no way to ensure that key material is securely erased in memory.
  *
  * Since this may harm the forward secrecy property,
- * we plan to resolve this issue; whenever Go allows us to do so.
+ * we plan to resolve this issue whenever Go allows us to do so.
  */
 
 type Keypair struct {
-	sendNonce    atomic.Uint64
-	send         cipher.AEAD
-	receive      cipher.AEAD
-	localIndex   uint32
-	remoteIndex  uint32
+	// keeps track of MessageTransport.Counter field
+	sendNonce atomic.Uint64
+	// encrypts outgoing packets
+	encrypt cipher.AEAD
+	// decrypts incoming packets
+	decrypt cipher.AEAD
+	// Random number assigned to a received handshake.
+	// Used for session retrieval.
+	localIndex uint32
+	// sender from handshake initiation
+	remoteIndex uint32
+	// indicates if device is handshake initiator
 	isInitiator  bool
 	replayFilter replay.Filter
 	createdAt    time.Time

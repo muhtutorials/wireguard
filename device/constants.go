@@ -51,13 +51,13 @@ const (
 // offsets of IPv4 packet fields
 const (
 	IPv4offsetTotalLen = 2
-	IPv4offsetSrc      = 12
-	IPv4offsetDst      = IPv4offsetSrc + net.IPv4len
+	IPv4offsetSrcAddr  = 12
+	IPv4offsetDstAddr  = IPv4offsetSrcAddr + net.IPv4len
 )
 
 // offsets of IPv6 packet fields
 const (
 	IPv6offsetPayloadLen = 4
-	IPv6offsetSrc        = 8
-	IPv6offsetDst        = IPv6offsetSrc + net.IPv6len
+	IPv6offsetSrcAddr    = 8
+	IPv6offsetDstAddr    = IPv6offsetSrcAddr + net.IPv6len
 )

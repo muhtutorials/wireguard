@@ -559,27 +559,29 @@ func (peer *Peer) BeginSymmetricSession() error {
 	defer hs.Unlock()
 	// derive keys
 	var (
+		// indicates if device is handshake initiator
 		isInitiator bool
-		sendKey     [chacha20poly1305.KeySize]byte
-		recvKey     [chacha20poly1305.KeySize]byte
+		encryptKey  [chacha20poly1305.KeySize]byte
+		decryptKey  [chacha20poly1305.KeySize]byte
 	)
-	if hs.state == handshakeResponseConsumed {
+	switch hs.state {
+	case handshakeResponseConsumed:
 		KDF2(
-			&sendKey,
-			&recvKey,
+			&encryptKey,
+			&decryptKey,
 			hs.chainKey[:],
 			nil,
 		)
 		isInitiator = true
-	} else if hs.state == handshakeResponseCreated {
+	case handshakeResponseCreated:
 		KDF2(
-			&recvKey,
-			&sendKey,
+			&decryptKey,
+			&encryptKey,
 			hs.chainKey[:],
 			nil,
 		)
 		isInitiator = false
-	} else {
+	default:
 		return fmt.Errorf("invalid state for keypair derivation: %v", hs.state)
 	}
 	// Doesn't necessarily need to be zeroed.
@@ -591,15 +593,15 @@ func (peer *Peer) BeginSymmetricSession() error {
 	peer.handshake.state = handshakeZeroed
 	// create AEAD instances
 	keypair := new(Keypair)
-	keypair.send, _ = chacha20poly1305.New(sendKey[:])
-	keypair.receive, _ = chacha20poly1305.New(recvKey[:])
-	setZero(sendKey[:])
-	setZero(recvKey[:])
-	keypair.createdAt = time.Now()
-	keypair.replayFilter.Reset()
-	keypair.isInitiator = isInitiator
+	keypair.encrypt, _ = chacha20poly1305.New(encryptKey[:])
+	keypair.decrypt, _ = chacha20poly1305.New(decryptKey[:])
+	setZero(encryptKey[:])
+	setZero(decryptKey[:])
 	keypair.localIndex = peer.handshake.localIndex
 	keypair.remoteIndex = peer.handshake.remoteIndex
+	keypair.isInitiator = isInitiator
+	keypair.replayFilter.Reset()
+	keypair.createdAt = time.Now()
 	// remap index
 	// TODO: look into it
 	d.sessions.SwapIndexForKeypair(hs.localIndex, keypair)

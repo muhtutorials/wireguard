@@ -136,7 +136,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	peer.cookieGenerator.AddMACs(buf)
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
-	if err = peer.SendBufs([][]byte{buf}); err != nil {
+	if err = peer.Send([][]byte{buf}); err != nil {
 		peer.device.log.Errorf(
 			"%v - Failed to send handshake initiation: %v",
 			peer,
@@ -179,7 +179,7 @@ func (peer *Peer) SendHandshakeResponse() error {
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 	// TODO: allocation could be avoided
-	if err = peer.SendBufs([][]byte{buf}); err != nil {
+	if err = peer.Send([][]byte{buf}); err != nil {
 		peer.device.log.Errorf(
 			"%v - Failed to send handshake response: %v",
 			peer,
@@ -223,7 +223,9 @@ func (peer *Peer) keepKeyFreshSending() {
 	}
 }
 
-func (d *Device) RoutineReadFromTUN() {
+// RoutineReceiveFromInternet receives packets from internet (internet -> device).
+// Device runs just one instance of this routine.
+func (d *Device) RoutineReceiveFromInternet() {
 	defer func() {
 		d.log.Verbosef("Routine: TUN reader - stopped")
 		d.state.stopping.Done()
@@ -255,10 +257,12 @@ func (d *Device) RoutineReadFromTUN() {
 		}
 	}()
 	for {
-		// read packets
+		// Kernel rewrites the destination address from the server’s public
+		// IP back to the original peer’s tunnel IP (e.g., 10.0.0.2).
 		nPackets, err = d.tun.device.Read(bufs, sizes, offset)
 		for i := range nPackets {
-			// TODO: why do we need this check?
+			// Check if number of bytes read into buf[i] is zero. If it is,
+			// then nothing was read into it and we move on to the next one.
 			if sizes[i] < 1 {
 				continue
 			}
@@ -272,13 +276,13 @@ func (d *Device) RoutineReadFromTUN() {
 				if len(item.packet) < ipv4.HeaderLen {
 					continue
 				}
-				dst := item.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
+				dst := item.packet[IPv4offsetDstAddr : IPv4offsetDstAddr+net.IPv4len]
 				peer = d.router.Find(dst)
 			case 6:
 				if len(item.packet) < ipv6.HeaderLen {
 					continue
 				}
-				dst := item.packet[IPv6offsetDst : IPv6offsetDst+net.IPv6len]
+				dst := item.packet[IPv6offsetDstAddr : IPv6offsetDstAddr+net.IPv6len]
 				peer = d.router.Find(dst)
 			default:
 				d.log.Verbosef("Received packet with unknown IP version")
@@ -324,6 +328,7 @@ func (d *Device) RoutineReadFromTUN() {
 	}
 }
 
+// StagePackets sends packet to
 func (peer *Peer) StagePackets(items *QuOutItemsWithLock) {
 	// This is a non-blocking send with cleanup of stale data pattern.
 	// It's a way to handle backpressure in a concurrent system.
@@ -417,43 +422,9 @@ top:
 	}
 }
 
-// padding calculates amount of bytes which should be added
-// to packet so it's divisible by PaddingMultiple.
-func padding(packetSize, mtu int) int {
-	lastUnit := packetSize
-	if mtu == 0 {
-		// ((1300 + 16 - 1) & ^(16 - 1)) - 1300
-		// (1315 & ^15) - 1300
-		// (0b0101_0010_0011 & ^0b1111) - 1300
-		// (0b0101_0010_0011 & 0b..._1111_0000) - 1300
-		// 0b0101_0010_0000 - 1300
-		// 1312 - 1300 = 12 (padding)
-		// (1300 + 12) / 16 = 82
-		return ((lastUnit + PaddingMultiple - 1) & ^(PaddingMultiple - 1)) - lastUnit
-	}
-	// 1600 > 1500
-	if lastUnit > mtu {
-		// 1600 % 1500 = 100
-		lastUnit %= mtu
-	}
-	// ((100 + 16 - 1) & ^(16 - 1))
-	// 115 & ^15
-	// 0b0111_0011 & ^0b1111
-	// 0b0111_0011 & 0b..._1111_0000
-	// 0b0111_0000 = 112
-	paddedSize := ((lastUnit + PaddingMultiple - 1) & ^(PaddingMultiple - 1))
-	// If lastUnit > mtu, the packet is broken up into
-	// 2 parts (1500 and 100 in this example).
-	// So we add padding to 100.
-	// min(112, 1500) = 112
-	paddedSize = min(paddedSize, mtu)
-	// 112 - 100 = 12 (padding)
-	// 112 / 16 = 7
-	return paddedSize - lastUnit
-}
-
-// Encrypts the elements in the queue and marks them
-// for sequential consumption (by releasing the mutex).
+// RoutineEncryption encrypts the items in the queue
+// (packets to be sent to peers) and marks them for
+// sequential consumption (by releasing the mutex).
 // There should be one instance per core.
 func (d *Device) RoutineEncryption(id int) {
 	var paddingZeros [PaddingMultiple]byte
@@ -474,7 +445,7 @@ func (d *Device) RoutineEncryption(id int) {
 			paddingSize := padding(len(item.packet), int(d.tun.mtu.Load()))
 			item.packet = append(item.packet, paddingZeros[:paddingSize]...)
 			// encrypt content and release to consumer
-			// TODO: why are firt 4 bytes not written to?
+			// TODO: why aren't first 4 bytes written to?
 			binary.LittleEndian.PutUint64(nonce[4:], item.nonce)
 			// Seal appends the encrypted message to the header.
 			// `item.buf` is reused here, encrypted message is
@@ -482,7 +453,7 @@ func (d *Device) RoutineEncryption(id int) {
 			// (item.buf[:MessageTransportHeaderSize] + encrypted message).
 			// And then saves the encrypted message to `item.packet`.
 			// Whole operation has zero allocations.
-			item.packet = item.keypair.send.Seal(
+			item.packet = item.keypair.encrypt.Seal(
 				header,
 				nonce[:],
 				item.packet,
@@ -494,9 +465,8 @@ func (d *Device) RoutineEncryption(id int) {
 	}
 }
 
-// RoutineSequentialSender sends ecrypted packets
-// to the peer via UDP connection.
-func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
+// RoutineSendToPeers sends UDP packets to peers (device -> peers).
+func (peer *Peer) RoutineSendToPeers(maxBatchSize int) {
 	// NOTE: lock is not released here because items are put
 	// back into the pool after use and then when they are
 	// taken again from the pool a new mutex is created.
@@ -534,7 +504,7 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 		}
 		peer.timersAnyAuthenticatedPacketTraversal()
 		peer.timersAnyAuthenticatedPacketSent()
-		err := peer.SendBufs(bufs)
+		err := peer.Send(bufs)
 		if dataSent {
 			peer.timersDataSent()
 		}
@@ -552,4 +522,39 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 		}
 		peer.keepKeyFreshSending()
 	}
+}
+
+// padding calculates amount of bytes which should be added
+// to packet so it's divisible by PaddingMultiple.
+func padding(packetSize, mtu int) int {
+	lastUnit := packetSize
+	if mtu == 0 {
+		// ((1300 + 16 - 1) & ^(16 - 1)) - 1300
+		// (1315 & ^15) - 1300
+		// (0b0101_0010_0011 & ^0b1111) - 1300
+		// (0b0101_0010_0011 & 0b..._1111_0000) - 1300
+		// 0b0101_0010_0000 - 1300
+		// 1312 - 1300 = 12 (padding)
+		// (1300 + 12) / 16 = 82
+		return ((lastUnit + PaddingMultiple - 1) & ^(PaddingMultiple - 1)) - lastUnit
+	}
+	// 1600 > 1500
+	if lastUnit > mtu {
+		// 1600 % 1500 = 100
+		lastUnit %= mtu
+	}
+	// ((100 + 16 - 1) & ^(16 - 1))
+	// 115 & ^15
+	// 0b0111_0011 & ^0b1111
+	// 0b0111_0011 & 0b..._1111_0000
+	// 0b0111_0000 = 112
+	paddedSize := ((lastUnit + PaddingMultiple - 1) & ^(PaddingMultiple - 1))
+	// If lastUnit > mtu, the packet is broken up into
+	// 2 parts (1500 and 100 in this example).
+	// So we add padding to 100.
+	// min(112, 1500) = 112
+	paddedSize = min(paddedSize, mtu)
+	// 112 - 100 = 12 (padding)
+	// 112 / 16 = 7
+	return paddedSize - lastUnit
 }

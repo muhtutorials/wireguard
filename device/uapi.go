@@ -188,9 +188,10 @@ func (d *Device) IpcSetOperation(r io.Reader) (err error) {
 	return nil
 }
 
-// An ipcSetPeer is the current state of an IPC set operation on a peer.
+// ipcSetPeer is the current state of an IPC set operation on a peer.
 type ipcSetPeer struct {
-	*Peer // current peer being operated on
+	// current peer being operated on
+	*Peer
 	// Dummy peers are a defensive programming pattern that:
 	// - Prevent nil pointer dereferences in IPC handling.
 	// - Allow graceful handling of self-referential configurations.
@@ -202,7 +203,7 @@ type ipcSetPeer struct {
 	keepaliveOn bool // peer had keepalive turned on
 }
 
-// applyConfig applies all the accumulated settings, stored
+// applyConfig applies all the accumulated configuration, stored
 // temporarily in the ipcSetPeer struct, for a peer to the device.
 func (peer *ipcSetPeer) applyConfig() {
 	if peer.Peer == nil || peer.dummy {
@@ -233,7 +234,7 @@ func (d *Device) handlePublicKeyLine(peer *ipcSetPeer, pubKey string) error {
 	peer.dummy = d.keys.publicKey.Equals(publicKey)
 	d.keys.RUnlock()
 	if peer.dummy {
-		peer.Peer = &Peer{}
+		peer.Peer = new(Peer)
 	} else {
 		peer.Peer = d.GetPeer(publicKey)
 	}
@@ -327,19 +328,6 @@ func (d *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error {
 		old := peer.KeepaliveInterval.Swap(uint32(secs))
 		// Send immediate keepalive if we're turning it on and before it wasn't on.
 		peer.keepaliveOn = old == 0 && secs != 0
-	case "replace_allowed_ips":
-		d.log.Verbosef("%v - UAPI: Removing all allowed IPs", peer.Peer)
-		if value != "true" {
-			return ipcErrorf(
-				ipc.IpcErrorInvalid,
-				"failed to replace allowed IPs, invalid value: %v",
-				value,
-			)
-		}
-		if peer.dummy {
-			return nil
-		}
-		d.router.RemoveByPeer(peer.Peer)
 	case "allowed_ip":
 		add := true
 		verb := "Adding"
@@ -376,6 +364,19 @@ func (d *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error {
 		} else {
 			d.router.Remove(prefix, peer.Peer)
 		}
+	case "replace_allowed_ips":
+		d.log.Verbosef("%v - UAPI: Removing all allowed IPs", peer.Peer)
+		if value != "true" {
+			return ipcErrorf(
+				ipc.IpcErrorInvalid,
+				"failed to replace allowed IPs, invalid value: %v",
+				value,
+			)
+		}
+		if peer.dummy {
+			return nil
+		}
+		d.router.RemoveByPeer(peer.Peer)
 	case "protocol_version":
 		if value != "1" {
 			return ipcErrorf(

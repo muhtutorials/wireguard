@@ -313,6 +313,7 @@ func (b *NetBind) receive(
 		}
 		addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
 		ep := &NetEndpoint{AddrPort: addrPort} // TODO: remove allocation
+		// fills out ep.src field
 		getSrcFromControl(msg.OOB[:msg.NN], ep)
 		eps[i] = ep
 	}
@@ -652,7 +653,7 @@ func coalesceMessages(
 		// Reset prior to incrementing base since we are
 		// preparing to start a new potential batch.
 		endBatch = false
-		// source address is set before GSO size in control
+		// source control is set before GSO size
 		setSrcControl(&msgs[i].OOB, ep)
 		msgs[i].Buffers[0] = buf
 		msgs[i].Addr = addr
