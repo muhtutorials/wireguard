@@ -118,10 +118,13 @@ func (d *Device) IpcGetOperation(w io.Writer) error {
 			sendf("tx_bytes=%d", peer.txBytes.Load())
 			sendf("rx_bytes=%d", peer.rxBytes.Load())
 			sendf("keepalive_interval=%d", peer.KeepaliveInterval.Load())
-			d.router.PeerNodes(peer, func(prefix netip.Prefix) bool {
-				sendf("allowed_ip=%s", prefix.String())
-				return true
-			})
+			d.router.PeerNodes(
+				peer,
+				func(prefix netip.Prefix) bool {
+					sendf("allowed_ip=%s", prefix.String())
+					return true
+				},
+			)
 		}
 	}()
 	// send lines (does not require resource locks)

@@ -13,8 +13,12 @@ import (
 	"unsafe"
 )
 
-// Parent indirection. Used for node removal optimization.
+// Parent indirection (storing a **node + childIndex instead
+// of just a *node) exists for direct, O(1) modification of
+// the parent's child pointer during removal, without needing
+// to know the parent node's address or compare children.
 type parent struct {
+	// pointer to one of the two elements of parent node's children array
 	child **node
 	// either 0 or 1 (left or right child)
 	childIndex uint8
@@ -34,7 +38,7 @@ type node struct {
 	// Prefix length: how many bits are fixed (the network part).
 	// The remaining bits are variable (the host part).
 	cidr uint8
-	// Byte index where host part begins:
+	// Index of byte where host part begins:
 	// 	192.168.1.0/24
 	// 	24 / 8 = 3
 	index uint8
@@ -46,11 +50,11 @@ type node struct {
 	addr []byte
 	peer *Peer
 	// Peer can have multiple IPs which are stored in Peer.nodes list.
-	// peerNode is an element in that list.
-	// Peer.nodes is used for easy peer removal where you don't
-	// need to traverse the whole trie by comparing node.peer == peer
+	// Node is an element in that list.
+	// Peer.nodes is used for easy peer removal where we don't need to
+	// traverse the whole trie by making comparison `node.peer == peer`
 	// to remove every node which belong to the peer.
-	// You can delete them directly by iterating Peer.nodes.
+	// We can delete them directly by iterating Peer.nodes.
 	peerNode *list.Element
 }
 
@@ -58,17 +62,17 @@ type node struct {
 // in two IPs are the same
 func commonBits(ip1, ip2 []byte) uint8 {
 	switch len(ip1) {
-	case net.IPv4len:
+	case net.IPv4len: // 4 bytes long
 		// convert []byte to uint32
 		a := binary.BigEndian.Uint32(ip1)
 		b := binary.BigEndian.Uint32(ip2)
 		// XOR two values so the same bits give a zero
 		x := a ^ b
 		// calculate how many leading bits are the same
-		// by counting leading zeroes which we get
+		// by counting leading zeroes which we got
 		// from the previous operation
 		return uint8(bits.LeadingZeros32(x))
-	case net.IPv6len:
+	case net.IPv6len: // 16 bytes long
 		a := binary.BigEndian.Uint64(ip1)
 		b := binary.BigEndian.Uint64(ip2)
 		x := a ^ b
@@ -76,7 +80,7 @@ func commonBits(ip1, ip2 []byte) uint8 {
 		if x != 0 {
 			return uint8(bits.LeadingZeros64(x))
 		}
-		// compare the second part of IP addresses (len(ipv6) == 16)
+		// compare the second part of IP addresses
 		a = binary.BigEndian.Uint64(ip1[8:])
 		b = binary.BigEndian.Uint64(ip2[8:])
 		x = a ^ b
@@ -86,6 +90,8 @@ func commonBits(ip1, ip2 []byte) uint8 {
 	}
 }
 
+// childIndex returns index of the child node to which passed IP belongs.
+// It's either 0 or 1 (left or right child).
 func (n *node) childIndex(ip []byte) byte {
 	return (ip[n.index] >> n.shift) & 1
 }
@@ -94,10 +100,11 @@ func (n *node) nodePlacement(ip []byte, cidr uint8) (parent *node, exact bool) {
 	// n != nil: checks if we reached the end of the trie.
 	// n.cidr <= cidr: checks if current node's prefix is
 	// 	equal or less specific than what we're inserting.
-	//	Can't go past a more specific route.
+	//	We can't go past a more specific route.
 	//	If current is `/24` and inserting `/16`, stop (would insert above).
 	// commonBits(n.addr, ip) >= n.cidr: checks if IP is
 	// 	on the node's network.
+	// /[number]: number of network bits (network part).
 	// Example trie:
 	// 10.0.0.0/8 (node A)
 	// ├── 10.0.0.0/16 (node B) ← child[0] of A
@@ -109,14 +116,13 @@ func (n *node) nodePlacement(ip []byte, cidr uint8) (parent *node, exact bool) {
 			exact = true
 			return
 		}
-		index := n.childIndex(ip)
-		n = n.children[index]
+		n = n.children[n.childIndex(ip)]
 	}
 	return
 }
 
-// maskSelf discards (zeroes out) all bits that are not
-// in cidr range
+// maskSelf discards (zeroes out) all bits that are not in CIDR range.
+// That is, only network part of IP address remains.
 func (n *node) maskSelf() {
 	// addr = []byte{192, 168, 1, 5}
 	// cidr = 24 (first 24 bits)
@@ -145,18 +151,19 @@ func (n *node) removeFromPeerNodes() {
 
 func (n *node) zeroOutPointers() {
 	// make the garbage collector's life slightly easier
-	n.peer = nil
 	n.parent.child = nil
 	n.children[0] = nil
 	n.children[1] = nil
+	n.peer = nil
 }
 
 func (p parent) insert(ip []byte, cidr uint8, peer *Peer) {
-	// p is the parent type with a child field which contains the root node.
-	// If parent has no child, add the inserted node as its child to be
-	// the first and root node in the trie.
+	// `p` here is the parent type with a child field containing
+	// the root node. If parent has no child, we add the new node
+	// as its child to be the first and the root node in the trie.
+	// CASE 1: the new node is the first node in the trie.
 	if *p.child == nil {
-		// trie is empty here, so we insert first node
+		// the trie is empty, so we insert the first node
 		newNode := &node{
 			parent: p,
 			cidr:   cidr,
@@ -171,10 +178,11 @@ func (p parent) insert(ip []byte, cidr uint8, peer *Peer) {
 		return
 	}
 	// Traverse the trie to find where to insert the new node.
-	// parentNode is the new node's parent.
+	// `parentNode` is the new node's parent.
 	parentNode, exact := (*p.child).nodePlacement(ip, cidr)
-	// Check if the new node has the same network address as its parent,
-	// if it is, just replace parent peer with new peer.
+	// Check if the new node has the same network address as its parent.
+	// If it does, we just replace parent peer with new peer.
+	// CASE 2: the new node has exact network address match.
 	if exact {
 		parentNode.removeFromPeerNodes()
 		parentNode.peer = peer
@@ -190,53 +198,58 @@ func (p parent) insert(ip []byte, cidr uint8, peer *Peer) {
 	}
 	newNode.maskSelf()
 	newNode.addToPeerNodes()
-	// down is either the root node or a parentNode's child which takes the slot
-	// where the new node fits.
+	// `down` is either the root node or a parent node's child
+	// which takes the slot where the new node fits
 	var down *node
+	// CASE 3: the new node has no parent.
 	if parentNode == nil {
-		// if new node has no parent start at the root
+		// if the new node has no parent start at the root
 		down = *p.child
-	} else {
-		// New node has a parent node. Find new node's child index.
+	} else { // CASE 4: the new node has a parent.
+		// Find the new node's child index.
 		index := parentNode.childIndex(ip)
 		down = parentNode.children[index]
-		// Check if child slot is empty,
-		// if it is, insert the new node there.
+		// Check if child slot is empty.
+		// If it is, insert the new node there.
+		// CASE 5: the new node's parent has a free child slot.
 		if down == nil {
 			newNode.parent = parent{&parentNode.children[index], index}
 			parentNode.children[index] = newNode
 			return
 		}
 	}
-	// New node needs to be inserted but there's
+	// The new node needs to be inserted but there's
 	// already an existing node (down) in the way.
 	// Calculate common prefix length.
 	common := commonBits(down.addr, ip)
 	cidr = min(cidr, common)
-	next := parentNode
-	// check if new node can be the parent of `down` node
+	// Check if the new node can be the parent of `down` node.
+	// CASE 6: the new node can be the parent of `down` node.
 	if newNode.cidr == cidr {
 		index := newNode.childIndex(down.addr)
 		down.parent = parent{&newNode.children[index], index}
 		newNode.children[index] = down
-		if next == nil {
+		// CASE 7: the new node has no parent but a parent itself.
+		if parentNode == nil {
 			newNode.parent = p
 			*p.child = newNode
-		} else {
-			index := next.childIndex(newNode.addr)
-			newNode.parent = parent{&next.children[index], index}
-			next.children[index] = newNode
+		} else { // CASE 8: the new node has a parent and a parent itself.
+			index := parentNode.childIndex(newNode.addr)
+			newNode.parent = parent{&parentNode.children[index], index}
+			parentNode.children[index] = newNode
 		}
 		return
 	}
-	// common node which will contain both new node and down node
-	// which was in the way
+	// common node which will contain both the new
+	// node and `down` node which was in the way
 	commonNode := &node{
-		cidr:  cidr,
+		cidr:  cidr, // min cidr
 		index: cidr / 8,
 		shift: 7 - (cidr % 8),
-		// copy slice
-		addr: append([]byte{}, newNode.addr...),
+		// Even if newNode.addr has longer prefix than minimum cidr
+		// between the new node and `down` node, it will be masked later.
+		// down.addr could be used here too.
+		addr: append([]byte{}, newNode.addr...), // copy slice
 	}
 	commonNode.maskSelf()
 	index := commonNode.childIndex(down.addr)
@@ -245,13 +258,14 @@ func (p parent) insert(ip []byte, cidr uint8, peer *Peer) {
 	index = commonNode.childIndex(newNode.addr)
 	newNode.parent = parent{&commonNode.children[index], index}
 	commonNode.children[index] = newNode
-	if next == nil {
+	// CASE 9: common node has no parent.
+	if parentNode == nil {
 		commonNode.parent = p
 		*p.child = commonNode
-	} else {
-		index := next.childIndex(commonNode.addr)
-		commonNode.parent = parent{&next.children[index], index}
-		next.children[index] = commonNode
+	} else { // CASE 10: common node has a parent.
+		index := parentNode.childIndex(commonNode.addr)
+		commonNode.parent = parent{&parentNode.children[index], index}
+		parentNode.children[index] = commonNode
 	}
 }
 
@@ -270,13 +284,16 @@ func (n *node) remove() {
 		index = 1
 	}
 	child := n.children[index]
-	// If node has one child, this child becomes node's parent's child,
-	// i.e. child becomes node and node is removed from the trie.
+	// If node has one child, this child becomes node
+	// and node is removed from the trie.
 	if child != nil {
 		child.parent = n.parent
 	}
 	*n.parent.child = child
-	if n.children[0] != nil || n.children[1] != nil || n.parent.childIndex > 1 {
+	// Node has one child or its parent struct is the root of the trie.
+	// `n.parent.childIndex > 1` checks for `2`
+	// which signifies the root of the trie.
+	if child != nil || n.parent.childIndex > 1 {
 		n.zeroOutPointers()
 		return
 	}
@@ -324,6 +341,9 @@ func (n *node) remove() {
 	// 					 		↓824634892368 mem addr of pointer to children[0]
 	//                    ↓mem addr of children[0] ↓mem addr of children[1]
 	// children: [2]*node{824634892288, 824634892320}
+	//
+	// Node has no children, so we remove it and check parent and its another child.
+	// We get parent node using pointer arithmetic.
 	ptrToChildPtr := uintptr(unsafe.Pointer(n.parent.child))
 	childrenOffset := unsafe.Offsetof(n.children)
 	childOffset := unsafe.Sizeof(n.children[0]) * uintptr(n.parent.childIndex)
@@ -335,7 +355,7 @@ func (n *node) remove() {
 		n.zeroOutPointers()
 		return
 	}
-	// check another parent's child
+	// check parent's another child
 	child = parent.children[n.parent.childIndex^1]
 	// If node has no children, parent node is empty
 	// (parent.peer == nil) and parent node has another child,
@@ -353,33 +373,31 @@ func (n *node) remove() {
 
 func (n *node) find(ip []byte) *Peer {
 	var peer *Peer
-	size := uint8(len(ip))
+	ipLen := uint8(len(ip))
 	// `commonBits(n.addr, ip) >= n.cidr` checks if IP is
 	// 	on the node's network.
 	for n != nil && commonBits(n.addr, ip) >= n.cidr {
 		if n.peer != nil {
 			peer = n.peer
 		}
-		// IP: 192.168.1.100 (size = 4 bytes).
-		// Node with /24: index = 3 (24/8 = 3), shift = 7.
+		// IP: 192.168.1.100 (ipLen = 4 bytes).
+		// Node with /24: index = 3 (24/8 = 3).
 		// We still need to check bit 24-31, so we continue.
-		// Node with /32: index = 4 (32/8 = 4), shit = 7.
-		// Since index == size (4 == 4), we break.
+		// Node with /32: index = 4 (32/8 = 4).
+		// Since index == ipLen (4 == 4), we break.
 		// There cannot be any child nodes because:
 		// 	You can't have a more specific route than a host route.
 		// 	There are no bits left to examine - we've used all 32/128 bits.
 		// Without this check, the code would try to compute:
-		// index := n.childIndex(ip)  // This would index beyond the IP slice!
-		// n = n.children[index]
+		// n.childIndex(ip) - this would index beyond the IP slice!
 		// For a /32 IPv4 route:
 		// 	n.index = 4
-		// 	But valid indices for ip are only 0-3
+		// 	But valid indices for ip are only 0-3.
 		//	This would cause an index out of bounds panic.
-		if n.index == size {
+		if n.index == ipLen {
 			break
 		}
-		index := n.childIndex(ip)
-		n = n.children[index]
+		n = n.children[n.childIndex(ip)]
 	}
 	return peer
 }
@@ -393,7 +411,7 @@ type Router struct {
 func (r *Router) Insert(prefix netip.Prefix, peer *Peer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// `parent.childIndex = 2` signifies the root of the trie
+	// `parent.childIndex == 2` signifies the root of the trie
 	if prefix.Addr().Is4() {
 		ip := prefix.Addr().As4()
 		parent{&r.IPv4, 2}.insert(ip[:], uint8(prefix.Bits()), peer)
@@ -432,16 +450,25 @@ func (r *Router) Remove(prefix netip.Prefix, peer *Peer) {
 	} else {
 		panic(errors.New("removing unknown address type"))
 	}
-	if !exact || n == nil || peer != n.peer {
+	if n == nil || !exact || peer != n.peer {
 		return
 	}
 	n.remove()
 }
 
+// RemoveByPeer removes all peer's nodes.
 func (r *Router) RemoveByPeer(peer *Peer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var next *list.Element
+	// Initialization (elem := peer.nodes.Front()) – evaluated once before
+	// the loop begins. It sets elem to the first element of the list.
+	// Condition (elem != nil) – evaluated before each iteration.
+	// If true, the loop body executes; if false, the loop terminates.
+	// Post statement (elem = next) – evaluated after each iteration’s
+	// body (i.e., after the remove() call). It advances elem to the
+	// element stored in next, which was recorded earlier inside the
+	// loop via next = elem.Next().
 	for elem := peer.nodes.Front(); elem != nil; elem = next {
 		// Save the next element, because the current element's
 		// pointers (elem.next and elem.prev) are zeroed out on removal.
@@ -450,13 +477,18 @@ func (r *Router) RemoveByPeer(peer *Peer) {
 	}
 }
 
-func (r *Router) PeerNodes(peer *Peer, cb func(prefix netip.Prefix) bool) {
+// PeerNodes provides a peer's nodes iterator.
+func (r *Router) PeerNodes(
+	peer *Peer,
+	yield func(prefix netip.Prefix) bool,
+) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for elem := peer.nodes.Front(); elem != nil; elem = elem.Next() {
 		n := elem.Value.(*node)
 		addr, _ := netip.AddrFromSlice(n.addr)
-		if !cb(netip.PrefixFrom(addr, int(n.cidr))) {
+		prefix := netip.PrefixFrom(addr, int(n.cidr))
+		if !yield(prefix) {
 			return
 		}
 	}
