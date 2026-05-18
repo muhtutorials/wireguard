@@ -56,6 +56,7 @@ func (d *Device) IpcGetOperation(w io.Writer) error {
 	}
 	// Converts a 32-byte binary key into a line of text like:
 	// private_key=3c7e1a2b9f4d8e6a1b3c5d7e9f0a2b4c6d8e0f1a2b3c4d5e6f7a8b9c0d1e2f3a
+	// Then writes it to buf.
 	keyf := func(prefix string, key *[32]byte) {
 		// `len(key)*2`: each byte is represented by two hex characters
 		// `+2`: 1 for '=' and 1 for '\n'
@@ -291,7 +292,7 @@ func (d *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error {
 		peer.Peer = &Peer{}
 		peer.dummy = true
 	case "preshared_key":
-		d.log.Verbosef("%v - UAPI: Updating preshared key", peer.Peer)
+		d.log.Verbosef("%v - UAPI: Updating pre-shared key", peer.Peer)
 		peer.handshake.Lock()
 		defer peer.handshake.Unlock()
 		if err := peer.handshake.presharedKey.FromHex(value); err != nil {

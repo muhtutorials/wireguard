@@ -40,6 +40,7 @@ func KDF1(t0 *[blake2s.Size]byte, key, input []byte) {
 }
 
 func KDF2(t0, t1 *[blake2s.Size]byte, key, input []byte) {
+	// pseudo-random key
 	var prk [blake2s.Size]byte
 	HMAC1(&prk, key, input)
 	HMAC1(t0, prk[:], []byte{0x1})
@@ -65,7 +66,7 @@ func isZero(val []byte) bool {
 }
 
 // This function is not used as pervasively as it should
-// because this is mostly impossible in Go at the moment
+// because this is mostly impossible in Go at the moment.
 func setZero(arr []byte) {
 	for i := range arr {
 		arr[i] = 0
@@ -81,20 +82,24 @@ func newPrivateKey() (NoisePrivateKey, error) {
 
 func (priv *NoisePrivateKey) publicKey() NoisePublicKey {
 	var pub NoisePublicKey
-	privBytes := (*[NoisePrivateKeySize]byte)(priv)
-	pubBytes := (*[NoisePublicKeySize]byte)(&pub)
-	curve25519.ScalarBaseMult(pubBytes, privBytes)
+	privArr := (*[NoisePrivateKeySize]byte)(priv)
+	pubArr := (*[NoisePublicKeySize]byte)(&pub)
+	curve25519.ScalarBaseMult(privArr, pubArr)
 	return pub
 }
 
 var errInvalidPublicKey = errors.New("invalid public key")
 
-func (priv *NoisePrivateKey) sharedSecret(pub NoisePublicKey) ([NoisePublicKeySize]byte, error) {
-	privBytes := (*[NoisePrivateKeySize]byte)(priv)[:]
-	pubBytes := (*[NoisePublicKeySize]byte)(&pub)[:]
-	shared, err := curve25519.X25519(privBytes, pubBytes)
+func (priv *NoisePrivateKey) sharedSecret(
+	pub NoisePublicKey, // peer’s static public key
+) ([NoisePublicKeySize]byte, error) {
+	privSlice := (*[NoisePrivateKeySize]byte)(priv)[:]
+	pubSlice := (*[NoisePublicKeySize]byte)(&pub)[:]
+	result, err := curve25519.X25519(privSlice, pubSlice)
+	var shared [NoisePublicKeySize]byte
 	if err != nil {
-		return [NoisePublicKeySize]byte(shared), err
+		return shared, err
 	}
-	return [NoisePublicKeySize]byte(shared), nil
+	copy(shared[:], result)
+	return shared, nil
 }

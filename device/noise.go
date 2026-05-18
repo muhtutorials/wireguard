@@ -12,11 +12,6 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-func init() {
-	InitialChainKey = blake2s.Sum256([]byte(NoiseConstruction))
-	mixHash(&InitialHash, &InitialChainKey, []byte(WGIdentifier))
-}
-
 type handshakeState int
 
 const (
@@ -70,21 +65,19 @@ const (
 	// size of fields preceding content field in MessageTransport
 	// (uint32 + uint32 + uint64 = 16 byte)
 	MessageTransportHeaderSize = 16
-	// size of empty transport
+	// size of empty transport message
 	// TODO: what is chacha20poly1305.Overhead?
 	MessageTransportSize = MessageTransportHeaderSize + chacha20poly1305.Overhead
 	// size of keepalive
 	MessageKeepaliveSize = MessageTransportSize
-	// size of largest handshake related message
-	MessageHandshakeSize = MessageInitiationSize
 )
 
 // offsets of encoded MessageTransport fields
 const (
-	MessageTransportOffsetReceiver = 4
-	MessageTransportOffsetCounter  = 8
+	MessageTransportReceiverOffset = 4
+	MessageTransportCounterOffset  = 8
 	// same as MessageTransportHeaderSize
-	MessageTransportOffsetContent = 16
+	MessageTransportContentOffset = 16
 )
 
 var errMessageLenMismatch = errors.New("message length mismatch")
@@ -95,8 +88,13 @@ var (
 	ZeroNonce       [chacha20poly1305.NonceSize]byte
 )
 
-// Type is an 8-bit field, followed by 3 nul bytes,
-// by marshalling the messages in little-endian byteorder
+func init() {
+	InitialChainKey = blake2s.Sum256([]byte(NoiseConstruction))
+	mixHash(&InitialHash, &InitialChainKey, []byte(WGIdentifier))
+}
+
+// Type is an 8-bit field, followed by 3 empty bytes,
+// by marshalling the messages in little-endian byte order
 // we can treat these as a 32-bit unsigned int (for now)
 
 type MessageInitiation struct {
@@ -104,20 +102,36 @@ type MessageInitiation struct {
 	// Random 32-bit index which initiator generates
 	// with SessionMap.NewIndexForHandshake. It identifies
 	// this specific handshake. Used in handshake response
-	// as `receiver` field, so initiator can identify to
-	// which handshake this response belongs.
-	Sender    uint32
+	// as `receiver` field, so initiator can identify
+	// to which handshake this response belongs.
+	Sender uint32
+	// Initiator's ephemeral Curve25519 public key.
+	// Generated for each handshake and sent unencrypted.
 	Ephemeral NoisePublicKey
-	Static    [NoisePublicKeySize + chacha20poly1305.Overhead]byte
+	// Initiator's long-term static public key.
+	// Encrypted to protect initiator's identity
+	// and to provide authentication.
+	Static [NoisePublicKeySize + chacha20poly1305.Overhead]byte
+	// Encrypted timestamp of MessageInitiation creation
+	// for replay protection.
 	Timestamp [tai64n.TimestampSize + chacha20poly1305.Overhead]byte
-	MAC1      [blake2s.Size128]byte
-	MAC2      [blake2s.Size128]byte
+	// Message authentication code.
+	// Verifies message integrity.
+	MAC1 [blake2s.Size128]byte
+	// DoS protection using cookie challenge.
+	// Mitigates DoS attacks by requiring computational work.
+	// Only included if responder previously sent a cookie.
+	MAC2 [blake2s.Size128]byte
 }
 
 func (m *MessageInitiation) marshal(b []byte) error {
 	if len(b) != MessageInitiationSize {
 		return errMessageLenMismatch
 	}
+	// WireGuard uses Little-Endian because it was designed primarily
+	// for modern x86/ARM CPUs (which are natively Little-Endian),
+	// and the developers prioritized performance over conforming to
+	// legacy network standards (RFC 1700).
 	binary.LittleEndian.PutUint32(b, m.Type)
 	binary.LittleEndian.PutUint32(b[4:], m.Sender)
 	copy(b[8:], m.Ephemeral[:])
@@ -143,13 +157,26 @@ func (m *MessageInitiation) unmarshal(b []byte) error {
 }
 
 type MessageResponse struct {
-	Type      uint32
-	Sender    uint32
-	Receiver  uint32
+	Type uint32
+	// Random 32-bit number chosen by responder.
+	// Identifies this specific handshake.
+	Sender uint32
+	// Sender field in a received MessageInitiation.
+	// Allows initiator to match response with their request to
+	// prevent confusion when multiple handshakes are in progress.
+	Receiver uint32
+	// Responder's ephemeral Curve25519 public key for key exchange.
+	// Generated for each handshake and sent unencrypted.
 	Ephemeral NoisePublicKey
-	Empty     [chacha20poly1305.Overhead]byte
-	MAC1      [blake2s.Size128]byte
-	MAC2      [blake2s.Size128]byte
+	// Cryptographic authentication without payload.
+	// Provides cryptographic proof that responder has the correct keys.
+	Empty [chacha20poly1305.Overhead]byte
+	// Message authentication code.
+	// Verifies message integrity and authenticates the responder.
+	MAC1 [blake2s.Size128]byte
+	// DoS protection.
+	// Mitigates amplification attacks by requiring computational work.
+	MAC2 [blake2s.Size128]byte
 }
 
 func (m *MessageResponse) marshal(b []byte) error {
@@ -182,6 +209,7 @@ func (m *MessageResponse) unmarshal(b []byte) error {
 
 type MessageTransport struct {
 	Type uint32
+	// Sender field from MessageInitiation.
 	// Identifies which cryptographic session this packet belongs to.
 	// It contains the index of the recipient's current sending key.
 	// It tells the receiver: "Use the private key associated
@@ -192,8 +220,29 @@ type MessageTransport struct {
 	// to reference the correct key for a session than sending
 	// the full public key with every data packet.
 	Receiver uint32 // session index
-	Counter  uint64
-	Content  []byte
+	// Number (nonce) used for replay protection.
+	// Each peer keeps a counter for the packets they send.
+	// This value is incremented for every new data message.
+	// The receiver remembers the highest counter value
+	// it has seen for a given session.
+	// If it receives a packet with a counter value
+	// that is less than or equal to the one
+	// it has already seen, it discards the packet.
+	// This prevents an attacker from capturing a valid
+	// packet and replaying it later to disrupt
+	// the connection or perform other attacks.
+	Counter uint64
+	// The actual data being sent through the tunnel,
+	// but in a processed form. The original plaintext
+	// IP packet (e.g., a TCP segment from browser)
+	// that needs to be sent through the tunnel is
+	// encrypted and authenticated using the symmetric
+	// keys derived during the handshake. The encryption
+	// algorithm is ChaCha20, and the authentication
+	// is provided by Poly1305 (together, "ChaCha20Poly1305").
+	// A 16-byte authentication tag (MAC) is appended
+	// to the encrypted data to ensure integrity.
+	Content []byte
 }
 
 type MessageCookieReply struct {
@@ -227,23 +276,37 @@ func (m *MessageCookieReply) unmarshal(b []byte) error {
 
 type Handshake struct {
 	state    handshakeState
-	hash     [blake2s.Size]byte // hash value
-	chainKey [blake2s.Size]byte // chain key
+	hash     [blake2s.Size]byte
+	chainKey [blake2s.Size]byte
 	// Randomly generated pre-shared symmetric key or PSK.
+	// It's used as an independent layer of defense
+	// against the future threat of quantum computers
+	// breaking current asymmetric encryption.
 	// This key is generated on the server and shared
-	// with peer beforehand like peer's key pair.
+	// with the peer beforehand like peer's public key.
+	// Set via UAPI.
 	presharedKey   NoisePresharedKey
 	localEphemeral NoisePrivateKey // ephemeral secret key
-	// Random number assigned to a received handshake.
+	// Wireguard uses localIndex and remoteIndex for the same
+	// handshake because a newly created index on one device
+	// can already exist on another!
+	//
+	// Random number assigned to a new handshake.
+	// Sender field in a sent MessageInitiation or MessageResponse.
 	// Used for session retrieval.
 	localIndex uint32
-	// sender from handshake initiation
+	// Sender field in a received MessageInitiation or MessageResponse.
 	remoteIndex uint32
 	// peer's static public key
-	remoteStatic              NoisePublicKey
-	remoteEphemeral           NoisePublicKey
-	precomputedSharedSecret   [NoisePublicKeySize]byte
-	lastTimestamp             tai64n.Timestamp
+	remoteStatic    NoisePublicKey
+	remoteEphemeral NoisePublicKey
+	// Derived from own static private and other side's static public.
+	// Precomputed when peer is added.
+	precomputedSharedSecret [NoisePublicKeySize]byte
+	// Timestamp of creation of the last received handshake.
+	// Used for replay protection.
+	lastTimestamp tai64n.Timestamp
+	// timestamp of reception of the last handshake
 	lastInitiationConsumption time.Time
 	lastSentHandshake         time.Time
 	sync.RWMutex
@@ -266,16 +329,16 @@ func (h *Handshake) mixKey(data []byte) {
 	mixKey(&h.chainKey, &h.chainKey, data)
 }
 
-func mixKey(dst, c *[blake2s.Size]byte, data []byte) {
-	KDF1(dst, c[:], data)
-}
-
 func mixHash(dst, h *[blake2s.Size]byte, data []byte) {
 	hash, _ := blake2s.New256(nil)
 	hash.Write(h[:])
 	hash.Write(data)
 	hash.Sum(dst[:0])
 	hash.Reset()
+}
+
+func mixKey(dst, c *[blake2s.Size]byte, data []byte) {
+	KDF1(dst, c[:], data)
 }
 
 func (d *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, error) {
@@ -327,9 +390,9 @@ func (d *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, error)
 	timestamp := tai64n.Now()
 	aead, _ = chacha20poly1305.New(key[:])
 	aead.Seal(msg.Timestamp[:0], ZeroNonce[:], timestamp[:], hs.hash[:])
-	// assign session index
+	// delete old session and create new one
 	d.sessions.Delete(hs.localIndex)
-	hs.localIndex, err = d.sessions.NewIndexForHandshake(peer, hs)
+	hs.localIndex, err = d.sessions.NewIndex(peer, hs)
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +459,11 @@ func (d *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	flood := time.Since(hs.lastInitiationConsumption) <= HandshakeInitationRate
 	hs.RUnlock()
 	if replay {
-		d.log.Verbosef("%v - ConsumeMessageInitiation: handshake replay @ %v", peer, timestamp)
+		d.log.Verbosef(
+			"%v - ConsumeMessageInitiation: handshake replay @ %v",
+			peer,
+			timestamp,
+		)
 		return nil
 	}
 	if flood {
@@ -409,6 +476,7 @@ func (d *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	hs.chainKey = chainKey
 	hs.remoteIndex = msg.Sender
 	hs.remoteEphemeral = msg.Ephemeral
+	// checked again because the lock is released between the two checks
 	if timestamp.After(hs.lastTimestamp) {
 		hs.lastTimestamp = timestamp
 	}
@@ -433,7 +501,7 @@ func (d *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error) {
 	// assign session index
 	var err error
 	d.sessions.Delete(hs.localIndex)
-	hs.localIndex, err = d.sessions.NewIndexForHandshake(peer, hs)
+	hs.localIndex, err = d.sessions.NewIndex(peer, hs)
 	if err != nil {
 		return nil, err
 	}
@@ -551,7 +619,8 @@ func (d *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 	return session.peer
 }
 
-// Derives a new keypair from the current handshake state.
+// BeginSymmetricSession derives a new keypair
+// from the current handshake state.
 func (peer *Peer) BeginSymmetricSession() error {
 	d := peer.device
 	hs := &peer.handshake
@@ -603,42 +672,63 @@ func (peer *Peer) BeginSymmetricSession() error {
 	keypair.replayFilter.Reset()
 	keypair.createdAt = time.Now()
 	// remap index
-	// TODO: look into it
-	d.sessions.SwapIndexForKeypair(hs.localIndex, keypair)
+	d.sessions.AddKeypair(hs.localIndex, keypair)
 	hs.localIndex = 0
 	// rotate key pairs
 	keypairs := &peer.keypairs
 	keypairs.Lock()
 	defer keypairs.Unlock()
+	current := keypairs.current
 	previous := keypairs.previous
 	next := keypairs.next.Load()
-	current := keypairs.current
+	// Handshake completes
+	//   Initiator can send data immediately: current <- new.
+	//   Responder waits: next <- new.
+	// Responder receives first encrypted packet
+	//   Swaps: previous <- current, current <- next.
+	// Key rotation during rekey:
+	//   `previous` allows packets encrypted with old key to be still decrypted.
+	//   Prevents packet loss during transition window.
+	// next != nil for initiator:
+	//   Happens if responder initiated rekey unexpectedly.
+	//   Code handles it by immediately activating it.
+	// This design ensures zero-downtime key rotation
+	// and asymmetric handshake completion.
+	//
+	// Initiator has just derived a keypair
+	// and wants to activate it immediately.
 	if isInitiator {
+		// Before: [previous] [current] [next?]
+		// After: [(old previous deleted) previous = current] [current = new] [next = nil]
 		if next != nil {
-			keypairs.next.Store(nil)
-			keypairs.previous = next
-			d.DeleteKeypair(current)
+			// there was already a staged next key (unusual for initiator)
+			keypairs.next.Store(nil) // clear staging area
+			keypairs.previous = next // demote next to previous
+			d.DeleteSession(current) // delete old current
 		} else {
+			// normal case, just demote current to previous
 			keypairs.previous = current
 		}
-		d.DeleteKeypair(previous)
+		d.DeleteSession(previous)
 		keypairs.current = keypair
 	} else {
-		keypairs.next.Store(keypair)
-		d.DeleteKeypair(next)
-		keypairs.previous = nil
-		d.DeleteKeypair(previous)
+		// Before: [previous] [current] [next?]
+		// After:  [previous deleted] [current unchanged] [next = new]
+		keypairs.next.Store(keypair) // stage as next (not active yet)
+		d.DeleteSession(next)        // delete any previously staged key
+		keypairs.previous = nil      // clear previous (no key to demote)
+		d.DeleteSession(previous)    // delete old previous
 	}
 	return nil
 }
 
-func (peer *Peer) ReceivedWithKeypair(kp *Keypair) bool {
+// ReceivedWithNewKeypair performs keypair rotation
+// in case of a new keypair reception.
+func (peer *Peer) ReceivedWithNewKeypair(new *Keypair) bool {
 	keypairs := &peer.keypairs
-	// Check if the received keypair matches
-	// the next (pending) keypair.
-	// This is a quick atomic read to avoid
-	// locking if it doesn't match.
-	if keypairs.next.Load() != kp {
+	// Check if the received keypair matches the next (pending) keypair.
+	// This is a quick atomic read to avoid locking if it doesn't match.
+	if keypairs.next.Load() != new {
 		return false
 	}
 	// acquire lock and re-validate
@@ -647,7 +737,7 @@ func (peer *Peer) ReceivedWithKeypair(kp *Keypair) bool {
 	// double-check that the next keypair hasn't
 	// changed between the first check and acquiring
 	// the lock (prevents race conditions)
-	if keypairs.next.Load() != kp {
+	if keypairs.next.Load() != new {
 		return false
 	}
 	// Perform the rotation:
@@ -655,11 +745,10 @@ func (peer *Peer) ReceivedWithKeypair(kp *Keypair) bool {
 	// previous → old keypair (to be deleted)    previous ← old current
 	// current → actively used keypair	         current ← old next
 	// next → pending keypair	                 next ← nil
-	prev := keypairs.previous
+	previous := keypairs.previous
 	keypairs.previous = keypairs.current
-	peer.device.DeleteKeypair(prev)
+	peer.device.DeleteSession(previous)
 	keypairs.current = keypairs.next.Load()
-	// TODO: where was it set before?
 	keypairs.next.Store(nil)
 	return true
 }

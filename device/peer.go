@@ -224,9 +224,9 @@ func (peer *Peer) ZeroAndFlushAll() {
 	// clear key pairs
 	keypairs := &peer.keypairs
 	keypairs.Lock()
-	device.DeleteKeypair(keypairs.previous)
-	device.DeleteKeypair(keypairs.current)
-	device.DeleteKeypair(keypairs.next.Load())
+	device.DeleteSession(keypairs.previous)
+	device.DeleteSession(keypairs.current)
+	device.DeleteSession(keypairs.next.Load())
 	keypairs.previous = nil
 	keypairs.current = nil
 	keypairs.next.Store(nil)

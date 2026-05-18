@@ -35,10 +35,7 @@ func (s *SessionMap) Delete(index uint32) {
 	delete(s.m, index)
 }
 
-func (s *SessionMap) NewIndexForHandshake(
-	peer *Peer,
-	handshake *Handshake,
-) (uint32, error) {
+func (s *SessionMap) NewIndex(peer *Peer, handshake *Handshake) (uint32, error) {
 	for {
 		index, err := randUint32()
 		if err != nil {
@@ -70,7 +67,8 @@ func (s *SessionMap) NewIndexForHandshake(
 	}
 }
 
-func (s *SessionMap) SwapIndexForKeypair(index uint32, keypair *Keypair) {
+// AddKeypair adds keypair to a session and zeroes out its handshake.
+func (s *SessionMap) AddKeypair(index uint32, keypair *Keypair) {
 	s.Lock()
 	defer s.Unlock()
 	session, ok := s.m[index]

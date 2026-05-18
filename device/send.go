@@ -445,7 +445,8 @@ func (d *Device) RoutineEncryption(id int) {
 			paddingSize := padding(len(item.packet), int(d.tun.mtu.Load()))
 			item.packet = append(item.packet, paddingZeros[:paddingSize]...)
 			// encrypt content and release to consumer
-			// TODO: why aren't first 4 bytes written to?
+			// Nonce is padded to 12 bytes. It's needed for explicit alignment
+			// with the ChaCha20 cipher's internal block counter.
 			binary.LittleEndian.PutUint64(nonce[4:], item.nonce)
 			// Seal appends the encrypted message to the header.
 			// `item.buf` is reused here, encrypted message is

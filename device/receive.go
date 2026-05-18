@@ -131,7 +131,7 @@ func (d *Device) RoutineReceiveFromPeers(maxBatchSize int, recv conn.ReceiveFunc
 				}
 				// get keypair
 				receiver := binary.LittleEndian.Uint32(
-					packet[MessageTransportOffsetReceiver:MessageTransportOffsetCounter],
+					packet[MessageTransportReceiverOffset:MessageTransportCounterOffset],
 				)
 				session := d.sessions.Get(receiver)
 				keypair := session.keypair
@@ -337,8 +337,8 @@ func (d *Device) RoutineDecryption(id int) {
 	for items := range d.qus.decryption.c {
 		for _, item := range items.items {
 			// split message into fields
-			counter := item.packet[MessageTransportOffsetCounter:MessageTransportOffsetContent]
-			content := item.packet[MessageTransportOffsetContent:]
+			counter := item.packet[MessageTransportCounterOffset:MessageTransportContentOffset]
+			content := item.packet[MessageTransportContentOffset:]
 			// decrypt and release to consumer
 			var err error
 			item.counter = binary.LittleEndian.Uint64(counter)
@@ -390,7 +390,7 @@ func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 				continue
 			}
 			validTailPacket = i
-			if peer.ReceivedWithKeypair(item.keypair) {
+			if peer.ReceivedWithNewKeypair(item.keypair) {
 				peer.SetEndpointFromPacket(item.endpoint)
 				peer.timersHandshakeComplete()
 				// TODO: why is it here?
@@ -443,7 +443,7 @@ func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 				device.log.Verbosef("Packet with invalid IP version from %v", peer)
 				continue
 			}
-			bufs = append(bufs, item.buf[:MessageTransportOffsetContent+len(item.packet)])
+			bufs = append(bufs, item.buf[:MessageTransportContentOffset+len(item.packet)])
 		}
 		peer.rxBytes.Add(rxBytesLen)
 		if validTailPacket >= 0 {
@@ -458,7 +458,7 @@ func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 		if len(bufs) > 0 {
 			// Kernel rewrites the source address from the peer's tunnel
 			// IP (e.g., 10.0.0.2) to the server's public IP address!
-			_, err := device.tun.device.Write(bufs, MessageTransportOffsetContent)
+			_, err := device.tun.device.Write(bufs, MessageTransportContentOffset)
 			if err != nil && !device.isClosed() {
 				device.log.Errorf("Failed to write packets to TUN device: %v", err)
 			}

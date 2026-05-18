@@ -40,11 +40,16 @@ type Keypairs struct {
 	// next is an independent value that can be set atomically
 	// without affecting the current/previous relationship.
 	//
-	// currently used keypair
+	// Currently used keypair. Can both encrypt and decrypt.
 	current *Keypair
-	// previous keypair (allows for delayed packets)
+	// When a new keypair is derived after a handshake, current
+	// keypair becomes previous keypair, which is used for
+	// delayed packets. After yet another handshake previous
+	// keypair is deleted and incoming packets associated with
+	// this keypair are ignored.
 	previous *Keypair
-	// next keypair (used during handshake)
+	// Next keypair. Not yet active,
+	// but ready (responder's new key after handshake)
 	next atomic.Pointer[Keypair]
 	sync.RWMutex
 }
@@ -55,7 +60,8 @@ func (k *Keypairs) Current() *Keypair {
 	return k.current
 }
 
-func (d *Device) DeleteKeypair(key *Keypair) {
+// DeleteSession deletes session associated with keypair.
+func (d *Device) DeleteSession(key *Keypair) {
 	if key != nil {
 		d.sessions.Delete(key.localIndex)
 	}
