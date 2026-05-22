@@ -30,9 +30,8 @@ type Peer struct {
 
 type endpoint struct {
 	val conn.Endpoint
-	// Signal to val.ClearSrc() prior to next packet transmission.
-	// When true clearSrcOnTx indicates that the source address
-	// should NOT be cleared when transmitting.
+	// When set to true, val.ClearSrc() should be
+	// called before next packet transmission.
 	clearSrcOnTx bool
 	sync.Mutex
 }
@@ -92,6 +91,7 @@ func (d *Device) NewPeer(pub NoisePublicKey) (*Peer, error) {
 	handshake.remoteStatic = pub
 	handshake.Unlock()
 	// reset endpoint
+	// NOTE: I'm not sure it's necessary.
 	peer.endpoint.Lock()
 	peer.endpoint.val = nil
 	peer.endpoint.clearSrcOnTx = false
@@ -262,10 +262,12 @@ func (peer *Peer) ExpireCurrentKeypairs() {
 func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 	peer.endpoint.Lock()
 	defer peer.endpoint.Unlock()
-	peer.endpoint.clearSrcOnTx = false
 	peer.endpoint.val = endpoint
+	peer.endpoint.clearSrcOnTx = false
 }
 
+// markEndpointSrcForClearing sets clearSrcOnTx to true, so
+// next time when `Peer.Send` is called, it calls `ClearSrc`.
 func (peer *Peer) markEndpointSrcForClearing() {
 	peer.endpoint.Lock()
 	defer peer.endpoint.Unlock()

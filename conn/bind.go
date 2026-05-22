@@ -104,15 +104,15 @@ func New() Bind {
 type NetEndpoint struct {
 	// endpoint destination
 	netip.AddrPort
-	// src is the current sticky source address and interface
+	// `src` is the current sticky source address and interface
 	// index, if supported. Typically this is a PKTINFO structure
-	// from/for control messages, see unix.PKTINFO for an example.
+	// from/for control messages (see unix.PKTINFO for an example).
 	// When a server has multiple IP addresses or multiple network
 	// interfaces, it needs to know:
 	// 	Which local IP received an incoming packet.
 	// 	Which interface received it.
 	// 	Which source IP to use when replying.
-	// src is msg.OOB or "hdr + data" from this function:
+	// `src` is msg.OOB or `hdr + data` from this function:
 	// hdr, data, remaining, err = unix.ParseOneSocketControlMessage(msg.OOB[:msg.NN])
 	src []byte
 }
@@ -214,14 +214,14 @@ func (b *NetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 }
 
 func (b *NetBind) makeReceiveIPv4(pc *ipv4.PacketConn, rxOffload bool) ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return b.receive(pc, rxOffload, bufs, sizes, eps)
+	return func(bufs [][]byte, sizes []int, endpoints []Endpoint) (n int, err error) {
+		return b.receive(pc, rxOffload, bufs, sizes, endpoints)
 	}
 }
 
 func (b *NetBind) makeReceiveIPv6(pc *ipv6.PacketConn, rxOffload bool) ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return b.receive(pc, rxOffload, bufs, sizes, eps)
+	return func(bufs [][]byte, sizes []int, endpoints []Endpoint) (n int, err error) {
+		return b.receive(pc, rxOffload, bufs, sizes, endpoints)
 	}
 }
 
@@ -259,7 +259,7 @@ func (b *NetBind) receive(
 	rxOffload bool,
 	bufs [][]byte,
 	sizes []int, // lengths of data read into bufs
-	eps []Endpoint,
+	endpoints []Endpoint,
 ) (n int, err error) {
 	msgs := b.getMessages()
 	defer b.putMessages(msgs)
@@ -312,10 +312,10 @@ func (b *NetBind) receive(
 			continue
 		}
 		addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
-		ep := &NetEndpoint{AddrPort: addrPort} // TODO: remove allocation
-		// fills out ep.src field
-		getSrcFromControl(msg.OOB[:msg.NN], ep)
-		eps[i] = ep
+		endpoint := &NetEndpoint{AddrPort: addrPort} // TODO: remove allocation
+		// fills endpoint.src field
+		getSrcFromControl(msg.OOB[:msg.NN], endpoint)
+		endpoints[i] = endpoint
 	}
 	return nMsgs, nil
 }
@@ -599,7 +599,7 @@ func splitMessages(msgs []ipv6.Message, firstMsgAt int) (nPackets int, err error
 func coalesceMessages(
 	msgs []ipv6.Message,
 	bufs [][]byte,
-	ep *NetEndpoint,
+	endpoint *NetEndpoint,
 	addr *net.UDPAddr,
 ) (nMsgs int) {
 	var (
@@ -613,7 +613,7 @@ func coalesceMessages(
 		endBatch bool
 	)
 	maxPayloadLen := maxIPv4PayloadLen
-	if ep.DstIP().Is6() {
+	if endpoint.DstIP().Is6() {
 		maxPayloadLen = maxIPv6PayloadLen
 	}
 	for j, buf := range bufs {
@@ -654,7 +654,7 @@ func coalesceMessages(
 		// preparing to start a new potential batch.
 		endBatch = false
 		// source control is set before GSO size
-		setSrcControl(&msgs[i].OOB, ep)
+		setSrcControl(&msgs[i].OOB, endpoint)
 		msgs[i].Buffers[0] = buf
 		msgs[i].Addr = addr
 	}

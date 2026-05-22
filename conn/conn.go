@@ -59,8 +59,8 @@ type Bind interface {
 //	dst: the remote address of a peer ("endpoint" in uapi terminology)
 type Endpoint interface {
 	SrcIP() netip.Addr
-	DstIP() netip.Addr
 	SrcToString() string // returns the local source address (IP:port)
+	DstIP() netip.Addr
 	DstToString() string // returns the destination address (IP:port)
 	DstToBytes() []byte  // used for mac2 cookie calculations
 	ClearSrc()           // clears the source address

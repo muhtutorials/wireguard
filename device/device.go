@@ -270,30 +270,33 @@ func (d *Device) changeState(new deviceState) (err error) {
 	return
 }
 
-// upLocked attempts to bring the device up and reports whether it succeeded.
-// The caller must hold d.state mutex and is responsible for updating d.state.val.
+// upLocked attempts to bring the device up and reports
+// whether it succeeded. The caller must hold d.state
+// mutex and is responsible for updating d.state.val.
 func (d *Device) upLocked() error {
 	if err := d.BindUpdate(); err != nil {
 		d.log.Errorf("Unable to update bind: %v", err)
 		return err
 	}
-	// The IPC set operation waits for peers to be created before calling Start() on them,
-	// so if there's a concurrent IPC set request happening, we should wait for it to complete.
+	// The IPC set operation waits for peers to be created
+	// before calling Start() on them, so if there's a concurrent
+	// IPC set request happening, we should wait for it to complete.
 	d.ipcMu.Lock()
 	defer d.ipcMu.Unlock()
 	d.peers.RLock()
+	defer d.peers.RUnlock()
 	for _, peer := range d.peers.val {
 		peer.Start()
 		if peer.KeepaliveInterval.Load() > 0 {
 			peer.SendKeepalive()
 		}
 	}
-	d.peers.RUnlock()
 	return nil
 }
 
-// downLocked attempts to bring the device down and reports whether it succeeded.
-// The caller must hold d.state mutex and is responsible for updating d.state.val.
+// downLocked attempts to bring the device down and reports
+// whether it succeeded. The caller must hold d.state mutex
+// and is responsible for updating d.state.val.
 func (d *Device) downLocked() error {
 	err := d.BindClose()
 	if err != nil {
@@ -319,18 +322,21 @@ func (d *Device) Down() error {
 func (d *Device) IsUnderLoad() bool {
 	now := time.Now()
 	// Check the length of the handshake queue.
-	// If it's at least 1/8 of QuHandshakeSize, the device is considered under load.
+	// If it's at least 1/8 of QuHandshakeSize,
+	// the device is considered under load.
 	// This indicates too many pending handshakes.
 	underLoad := len(d.qus.handshake.c) >= QuHandshakeSize/8
 	if underLoad {
-		// Set a timestamp underLoadUntil to the current time + UnderLoadAfterTime.
+		// Set a timestamp underLoadUntil to the
+		// current time + UnderLoadAfterTime.
 		// This creates a "cooldown" period.
 		// Returns true (device is under load).
 		d.rateLimiter.underLoadUntil.Store(now.Add(UnderLoadAfterTime).UnixNano())
 		return true
 	}
-	// Check if we're still in the "cooldown" period from a previous load event.
-	// Return true if the "cooldown" hasn't expired yet.
+	// Check if we're still in the "cooldown" period
+	// from a previous load event. Return true if the
+	// "cooldown" hasn't expired yet.
 	return d.rateLimiter.underLoadUntil.Load() > now.UnixNano()
 }
 

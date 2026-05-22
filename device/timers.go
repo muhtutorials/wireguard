@@ -104,6 +104,7 @@ func expiredRetransmitHandshake(peer *Peer) {
 		peer.markEndpointSrcForClearing()
 		peer.SendHandshakeInitiation(true)
 	}
+
 }
 
 func expiredSendKeepalive(peer *Peer) {

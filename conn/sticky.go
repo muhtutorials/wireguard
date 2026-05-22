@@ -1,4 +1,4 @@
-// sticky sockets is preservation and reuse of source address information
+// Sticky sockets is preservation and reuse of source address information
 // (IP address and interface index) across multiple send operations.
 package conn
 
@@ -8,8 +8,6 @@ import (
 
 	"golang.org/x/sys/unix"
 )
-
-const NetSupportsStickySockets = true
 
 // ADDRESS    CONTENT                                    INTERPRETATION
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,9 +42,9 @@ const NetSupportsStickySockets = true
 var stickyControlSize = unix.CmsgSpace(unix.SizeofInet6Pktinfo)
 
 // getSrcFromControl parses the `control` (msg.OOB[:msg.NN]) for PKTINFO
-// and if found updates `ep` with the source information found.
-func getSrcFromControl(control []byte, ep *NetEndpoint) {
-	ep.ClearSrc()
+// and if found updates `endpoint` with the source information found.
+func getSrcFromControl(control []byte, endpoint *NetEndpoint) {
+	endpoint.ClearSrc()
 	var (
 		hdr       unix.Cmsghdr
 		data      []byte
@@ -65,15 +63,16 @@ func getSrcFromControl(control []byte, ep *NetEndpoint) {
 			hdr.Type == unix.IP_PKTINFO {
 			// CmsgSpace calculates the buffer space needed for control messages
 			// including proper alignment for the next control message.
-			if ep.src == nil || cap(ep.src) < unix.CmsgSpace(unix.SizeofInet4Pktinfo) {
-				ep.src = make([]byte, 0, unix.CmsgSpace(unix.SizeofInet4Pktinfo))
+			if endpoint.src == nil ||
+				cap(endpoint.src) < unix.CmsgSpace(unix.SizeofInet4Pktinfo) {
+				endpoint.src = make([]byte, 0, unix.CmsgSpace(unix.SizeofInet4Pktinfo))
 			}
-			ep.src = ep.src[:unix.CmsgSpace(unix.SizeofInet4Pktinfo)]
+			endpoint.src = endpoint.src[:unix.CmsgSpace(unix.SizeofInet4Pktinfo)]
 			hdrSlice := unsafe.Slice((*byte)(unsafe.Pointer(&hdr)), unix.SizeofCmsghdr)
-			copy(ep.src, hdrSlice)
+			copy(endpoint.src, hdrSlice)
 			// CmsgLen calculates the exact length of a control message
 			// including its header.
-			copy(ep.src[unix.CmsgLen(0):], data)
+			copy(endpoint.src[unix.CmsgLen(0):], data)
 			return
 		}
 		// IPPROTO_IPV6: protocol level constant for IPv6 socket options.
@@ -81,29 +80,30 @@ func getSrcFromControl(control []byte, ep *NetEndpoint) {
 		// sending detailed packet information for IPv6 sockets.
 		if hdr.Level == unix.IPPROTO_IPV6 &&
 			hdr.Type == unix.IPV6_PKTINFO {
-			if ep.src == nil || cap(ep.src) < unix.CmsgSpace(unix.SizeofInet6Pktinfo) {
-				ep.src = make([]byte, 0, unix.CmsgSpace(unix.SizeofInet6Pktinfo))
+			if endpoint.src == nil ||
+				cap(endpoint.src) < unix.CmsgSpace(unix.SizeofInet6Pktinfo) {
+				endpoint.src = make([]byte, 0, unix.CmsgSpace(unix.SizeofInet6Pktinfo))
 			}
-			ep.src = ep.src[:unix.CmsgSpace(unix.SizeofInet6Pktinfo)]
+			endpoint.src = endpoint.src[:unix.CmsgSpace(unix.SizeofInet6Pktinfo)]
 			hdrSlice := unsafe.Slice((*byte)(unsafe.Pointer(&hdr)), unix.SizeofCmsghdr)
-			copy(ep.src, hdrSlice)
-			copy(ep.src[unix.CmsgLen(0):], data)
+			copy(endpoint.src, hdrSlice)
+			copy(endpoint.src[unix.CmsgLen(0):], data)
 			return
 		}
 	}
 }
 
 // setSrcControl sets an IP{V6}_PKTINFO in `control` (msgs[i].OOB)
-// based on the source address and source ifindex found in `ep`.
-// `control`'s len will be set to 0 in the event that `ep`
+// based on the source address and source ifindex found in `endpoint`.
+// `control`'s len will be set to 0 in the event that `endpoint`
 // is the default value.
-// `control` is a pointer because we modify slice's header (len field).
-func setSrcControl(control *[]byte, ep *NetEndpoint) {
-	if cap(*control) < len(ep.src) {
+// `control` is a pointer because we modify slice's "header" (len field).
+func setSrcControl(control *[]byte, endpoint *NetEndpoint) {
+	if cap(*control) < len(endpoint.src) {
 		return
 	}
 	*control = (*control)[:0]
-	*control = append(*control, ep.src...)
+	*control = append(*control, endpoint.src...)
 }
 
 func (e *NetEndpoint) SrcIP() netip.Addr {
@@ -121,7 +121,7 @@ func (e *NetEndpoint) SrcIP() netip.Addr {
 	//     The destination IP address from the IP header.
 	//     Usually the same as what you'd see in regular socket operations.
 	case unix.CmsgSpace(unix.SizeofInet4Pktinfo):
-		// unix.CmsgLen(0) gives header length (payload start index)
+		// unix.CmsgLen(0) returns header length (payload start index)
 		info := (*unix.Inet4Pktinfo)(unsafe.Pointer(&e.src[unix.CmsgLen(0)]))
 		return netip.AddrFrom4(info.Spec_dst)
 	case unix.CmsgSpace(unix.SizeofInet6Pktinfo):
