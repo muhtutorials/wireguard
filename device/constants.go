@@ -7,16 +7,26 @@ import (
 
 // specification constants
 const (
-	RekeyAfterMessages      = (1 << 60)
-	RejectAfterMessages     = (1 << 64) - (1 << 13) - 1
-	RekeyAfterTime          = time.Second * 120
-	RekeyAttemptTime        = time.Second * 90
-	RekeyTimeout            = time.Second * 5
-	MaxTimerHandshakes      = 90 / 5 // = RekeyAttemptTime / RekeyTimeout
+	// rekey is a new handshake initiation to derive fresh encryption keys
+	RekeyAfterMessages  = (1 << 60)
+	RejectAfterMessages = (1 << 64) - (1 << 13) - 1
+	RekeyAfterTime      = time.Second * 120
+	RekeyAttemptTime    = time.Second * 90
+	// how long to wait for a handshake response before retrying
+	RekeyTimeout         = time.Second * 5
+	MaxHandshakeAttempts = uint32(RekeyAttemptTime / RekeyTimeout)
+	// If many peers experience timeout simultaneously
+	// (e.g., network glitch), without jitter they'd all
+	// retry at the exact same moment, causing a traffic spike.
+	// Adding random jitter spreads out the retransmissions.
 	RekeyTimeoutJitterMaxMs = 334
-	RejectAfterTime         = time.Second * 180
-	KeepaliveTimeout        = time.Second * 10
-	// specifies how long cookie is valid
+	// maximum lifetime of a keypair from creation to deletion
+	RejectAfterTime = time.Second * 180
+	// KeepaliveTimeout controls how often "keepalive"
+	// packets are sent to maintain a connection when
+	// there's no regular data traffic.
+	KeepaliveTimeout = time.Second * 10
+	// how long cookie is valid
 	CookieRefreshTime      = time.Second * 120
 	HandshakeInitationRate = time.Second / 50
 	// 16 bytes (128 bits) is a fundamental alignment size in modern cryptography:

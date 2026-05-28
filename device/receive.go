@@ -47,6 +47,35 @@ func (i *QuInItem) zeroOutPointers() {
 // keepKeyFreshReceiving is called when a new authenticated
 // message has been received.
 // NOTE: Not thread safe, but called by sequential receiver!
+//
+// Why keepKeyFreshReceiving is needed
+// The Problem: Key Expiration Without Traffic
+// WireGuard has a key lifetime limit called RejectAfterTime.
+// After this time, a keypair is considered expired and will be rejected.
+// However, consider this scenario:
+//   - Initiator sends data, establishing a keypair (created at time T).
+//   - Both sides are using this keypair.
+//   - No traffic flows for ~170 seconds (approaching RejectAfterTime).
+//   - Receiver gets a new packet at T+175 seconds.
+//
+// Without keepKeyFreshReceiving, the receiver would:
+//   - Receive the packet using a keypair that's about to expire.
+//   - Not initiate a new handshake (because only initiator initiates).
+//   - The keypair would expire completely at T+180 seconds.
+//   - Future packets would be rejected until the initiator eventually
+//     sends a new handshake (which might take another
+//     KeepaliveTimeout + RekeyTimeout = 15 seconds).
+//
+// This creates a dead period where communication is impossible.
+// The Solution: Proactive Handshake
+// keepKeyFreshReceiving detects when:
+//   - The current keypair is the initiator (meaning this peer initiated the handshake).
+//   - The keypair is within the last 15 seconds of its lifetime
+//     (RejectAfterTime - KeepaliveTimeout - RekeyTimeout).
+//   - This peer hasn't already sent a last-minute handshake.
+//
+// It then proactively sends a new handshake initiation,
+// preventing key expiration gaps.
 func (peer *Peer) keepKeyFreshReceiving() {
 	if peer.timers.sentLastMinuteHandshake.Load() {
 		return
@@ -283,8 +312,8 @@ func (d *Device) RoutineHandshake(id int) {
 				goto skip
 			}
 			// update timers
-			peer.timersAnyAuthenticatedPacketTraversal()
-			peer.timersAnyAuthenticatedPacketReceived()
+			peer.timersAuthenticatedPacketTraversal()
+			peer.timersAuthenticatedPacketReceived()
 			// update endpoint
 			peer.SetEndpointFromPacket(item.endpoint)
 			d.log.Verbosef("%v - Received handshake initiation", peer)
@@ -311,8 +340,8 @@ func (d *Device) RoutineHandshake(id int) {
 			d.log.Verbosef("%v - Received handshake response", peer)
 			peer.rxBytes.Add(uint64(len(item.packet)))
 			// update timers
-			peer.timersAnyAuthenticatedPacketTraversal()
-			peer.timersAnyAuthenticatedPacketReceived()
+			peer.timersAuthenticatedPacketTraversal()
+			peer.timersAuthenticatedPacketReceived()
 			// derive keypair
 			if err := peer.BeginSymmetricSession(); err != nil {
 				d.log.Errorf("%v - Failed to derive keypair: %v", peer, err)
@@ -392,6 +421,8 @@ func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 			validTailPacket = i
 			if peer.ReceivedWithNewKeypair(item.keypair) {
 				peer.SetEndpointFromPacket(item.endpoint)
+				// received an item with the new keypair,
+				// which means handshake is complete
 				peer.timersHandshakeComplete()
 				// TODO: why is it here?
 				peer.SendStagedPackets()
@@ -436,7 +467,10 @@ func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 				item.packet = item.packet[:length]
 				srcAddr := item.packet[IPv6offsetSrcAddr : IPv6offsetSrcAddr+net.IPv6len]
 				if device.router.Find(srcAddr) != peer {
-					device.log.Verbosef("IPv6 packet with disallowed source address from %v", peer)
+					device.log.Verbosef(
+						"IPv6 packet with disallowed source address from %v",
+						peer,
+					)
 					continue
 				}
 			default:
@@ -449,8 +483,8 @@ func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 		if validTailPacket >= 0 {
 			peer.SetEndpointFromPacket(items.items[validTailPacket].endpoint)
 			peer.keepKeyFreshReceiving()
-			peer.timersAnyAuthenticatedPacketTraversal()
-			peer.timersAnyAuthenticatedPacketReceived()
+			peer.timersAuthenticatedPacketTraversal()
+			peer.timersAuthenticatedPacketReceived()
 		}
 		if dataPacketReceived {
 			peer.timersDataReceived()

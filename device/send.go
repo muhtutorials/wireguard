@@ -134,8 +134,8 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	buf := make([]byte, MessageInitiationSize)
 	_ = handshakeInit.marshal(buf)
 	peer.cookieGenerator.AddMACs(buf)
-	peer.timersAnyAuthenticatedPacketTraversal()
-	peer.timersAnyAuthenticatedPacketSent()
+	peer.timersAuthenticatedPacketTraversal()
+	peer.timersAuthenticatedPacketSent()
 	if err = peer.Send([][]byte{buf}); err != nil {
 		peer.device.log.Errorf(
 			"%v - Failed to send handshake initiation: %v",
@@ -176,8 +176,8 @@ func (peer *Peer) SendHandshakeResponse() error {
 		return err
 	}
 	peer.timersSessionDerived()
-	peer.timersAnyAuthenticatedPacketTraversal()
-	peer.timersAnyAuthenticatedPacketSent()
+	peer.timersAuthenticatedPacketTraversal()
+	peer.timersAuthenticatedPacketSent()
 	// TODO: allocation could be avoided
 	if err = peer.Send([][]byte{buf}); err != nil {
 		peer.device.log.Errorf(
@@ -328,7 +328,6 @@ func (d *Device) RoutineReceiveFromInternet() {
 	}
 }
 
-// StagePackets sends packet to
 func (peer *Peer) StagePackets(items *QuOutItemsWithLock) {
 	// This is a non-blocking send with cleanup of stale data pattern.
 	// It's a way to handle backpressure in a concurrent system.
@@ -466,8 +465,8 @@ func (d *Device) RoutineEncryption(id int) {
 	}
 }
 
-// RoutineSendToPeers sends UDP packets to peers (device -> peers).
-func (peer *Peer) RoutineSendToPeers(maxBatchSize int) {
+// RoutineSendToPeer sends UDP packets to peer (device -> peer).
+func (peer *Peer) RoutineSendToPeer(maxBatchSize int) {
 	// NOTE: lock is not released here because items are put
 	// back into the pool after use and then when they are
 	// taken again from the pool a new mutex is created.
@@ -503,8 +502,8 @@ func (peer *Peer) RoutineSendToPeers(maxBatchSize int) {
 			}
 			bufs = append(bufs, item.packet)
 		}
-		peer.timersAnyAuthenticatedPacketTraversal()
-		peer.timersAnyAuthenticatedPacketSent()
+		peer.timersAuthenticatedPacketTraversal()
+		peer.timersAuthenticatedPacketSent()
 		err := peer.Send(bufs)
 		if dataSent {
 			peer.timersDataSent()

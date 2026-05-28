@@ -47,14 +47,18 @@ type peerQus struct {
 }
 
 type timers struct {
-	newHandshake            *Timer
-	retransmitHandshake     *Timer
-	sendKeepalive           *Timer
-	Keepalive               *Timer
-	zeroKeyMaterial         *Timer
-	handshakeAttempts       atomic.Uint32
+	newHandshake    *Timer
+	resendHandshake *Timer
+	sendKeepalive   *Timer
+	keepalive       *Timer
+	// zeroes out peer's keys
+	zeroOutKeys       *Timer
+	handshakeAttempts atomic.Uint32
+	// Tells if peer has already sent a last-minute handshake.
+	// (explanation at Peer.keepKeyFreshReceiving)
 	sentLastMinuteHandshake atomic.Bool
-	needAnotherKeepalive    atomic.Bool
+	// prevents expensive timer resets on every packet
+	needAnotherKeepalive atomic.Bool
 }
 
 // NewPeer is used by handlePublicKeyLine method to create
@@ -169,7 +173,7 @@ func (peer *Peer) Start() {
 	// Use the device batch size, not the bind batch size,
 	// as the device size is the size of the batch pools.
 	batchSize := peer.device.BatchSize()
-	go peer.RoutineSendToPeers(batchSize)
+	go peer.RoutineSendToPeer(batchSize)
 	go peer.RoutineSendToInternet(batchSize)
 	peer.isRunning.Store(true)
 }
@@ -210,7 +214,8 @@ func (peer *Peer) Stop() {
 	}
 	peer.device.log.Verbosef("%v - Stopping", peer)
 	peer.timersStop()
-	// Signal that RoutineSequentialSender and RoutineSequentialReceiver should exit.
+	// Signal that RoutineSequentialSender and
+	// RoutineSequentialReceiver should exit.
 	peer.qus.out.c <- nil
 	peer.qus.in.c <- nil
 	peer.stopping.Wait()
@@ -224,11 +229,11 @@ func (peer *Peer) ZeroAndFlushAll() {
 	// clear key pairs
 	keypairs := &peer.keypairs
 	keypairs.Lock()
-	device.DeleteSession(keypairs.previous)
 	device.DeleteSession(keypairs.current)
+	device.DeleteSession(keypairs.previous)
 	device.DeleteSession(keypairs.next.Load())
-	keypairs.previous = nil
 	keypairs.current = nil
+	keypairs.previous = nil
 	keypairs.next.Store(nil)
 	keypairs.Unlock()
 	// clear handshake state
