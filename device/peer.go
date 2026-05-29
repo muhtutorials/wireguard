@@ -42,7 +42,7 @@ type peerQus struct {
 	staged chan *QuOutItemsWithLock
 	// sequential ordering of UDP transmission
 	out *quOutFlush
-	// sequential ordering of tun writing
+	// sequential ordering of TUN writing
 	in *quInFlush
 }
 
@@ -150,7 +150,7 @@ func (peer *Peer) Start() {
 	// Wait() blocks until any previous goroutines from a previous
 	// start have completely finished.
 	// Only after they're done, we add 2 for the new goroutines we're about
-	// to launch (RoutineSequentialSender and RoutineSequentialReceiver).
+	// to launch (RoutineSendToPeer and RoutineSendToInternet).
 	// This prevents resource leaks and ensures we don't have
 	// multiple instances of the same routines running concurrently
 	// if Start() is called twice in quick succession.
@@ -214,8 +214,8 @@ func (peer *Peer) Stop() {
 	}
 	peer.device.log.Verbosef("%v - Stopping", peer)
 	peer.timersStop()
-	// Signal that RoutineSequentialSender and
-	// RoutineSequentialReceiver should exit.
+	// Signal that RoutineSendToPeer and
+	// RoutineSendToInternet should exit.
 	peer.qus.out.c <- nil
 	peer.qus.in.c <- nil
 	peer.stopping.Wait()

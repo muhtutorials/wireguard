@@ -393,12 +393,13 @@ func (d *Device) RoutineDecryption(id int) {
 func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 	device := peer.device
 	defer func() {
-		device.log.Verbosef("%v - Routine: sequential receiver - stopped", peer)
+		device.log.Verbosef("%v - Routine: sender to internet - stopped", peer)
 		peer.stopping.Done()
 	}()
-	device.log.Verbosef("%v - Routine: sequential receiver - started", peer)
+	device.log.Verbosef("%v - Routine: sender to internet - started", peer)
 	bufs := make([][]byte, 0, maxBatchSize)
 	for items := range peer.qus.in.c {
+		// nil value is a signal to exit routine sent by Peer.Stop()
 		if items == nil {
 			return
 		}

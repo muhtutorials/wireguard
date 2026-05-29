@@ -12,14 +12,10 @@ const (
 	QuOutSize       = 1024
 	QuInSize        = 1024
 	QuHandshakeSize = 1024
-	// largest possible UDP datagram
-	MaxSegmentSize = (1 << 16) - 1
-	// disable and allow for infinite memory growth
-	PreallocatedBufsPerPool = 0
 )
 
 // quOut is a channel of QuOutItems awaiting encryption.
-// quOut is ref-counted using its wg field.
+// quOut is ref-counted using its `wg` field.
 // quOut created with newQuOut has one reference.
 // Every additional writer must call wg.Add(1).
 // Every completed writer must call wg.Done().
@@ -83,16 +79,16 @@ type quOutFlush struct {
 	c chan *QuOutItemsWithLock
 }
 
-// newQuOutFlush returns a channel that will be flushed when it gets GC'd.
-// It is useful in cases in which is it hard to manage the lifetime of the channel.
-// The returned channel must not be closed. Senders should signal shutdown using
-// some other means, such as sending a sentinel nil values.
-// All sends to the channel must be best-effort, because there may be no receivers.
+// newQuOutFlush returns a channel that will be flushed when
+// it gets GC'd. It is useful in cases in which is it hard
+// to manage the lifetime of the channel. The returned channel
+// must not be closed. Senders should signal shutdown using
+// some other means, such as sending a sentinel nil value.
 func newQuOutFlush(d *Device) *quOutFlush {
 	q := &quOutFlush{
 		c: make(chan *QuOutItemsWithLock, QuOutSize),
 	}
-	// NOTE: SetFinalizer is analagous to drop method in Rust
+	// NOTE: SetFinalizer is analogous to drop method in Rust
 	runtime.SetFinalizer(q, d.flushQuOut)
 	return q
 }
@@ -102,11 +98,7 @@ func (d *Device) flushQuOut(q *quOutFlush) {
 		select {
 		case items := <-q.c:
 			items.Lock()
-			for _, item := range items.items {
-				d.PutMessageBuf(item.buf)
-				d.PutQuOutItem(item)
-			}
-			d.PutQuOutItemsWithLock(items)
+			d.PutQuOutItems(items)
 		default:
 			return
 		}
@@ -117,10 +109,11 @@ type quInFlush struct {
 	c chan *QuInItemsWithLock
 }
 
-// newQuInFlush returns a channel that will be flushed when it gets GC'd.
-// It is useful in cases in which is it hard to manage the lifetime of the channel.
-// The returned channel must not be closed. Senders should signal shutdown using
-// some other means, such as sending a sentinel nil values.
+// newQuInFlush returns a channel that will be flushed when
+// it gets GC'd. It is useful in cases in which is it hard
+// to manage the lifetime of the channel. The returned channel
+// must not be closed. Senders should signal shutdown using
+// some other means, such as sending a sentinel nil value.
 func newQuInFlush(device *Device) *quInFlush {
 	q := &quInFlush{
 		c: make(chan *QuInItemsWithLock, QuInSize),
@@ -134,11 +127,7 @@ func (d *Device) flushQuIn(q *quInFlush) {
 		select {
 		case items := <-q.c:
 			items.Lock()
-			for _, item := range items.items {
-				d.PutMessageBuf(item.buf)
-				d.PutQuInItem(item)
-			}
-			d.PutQuInItemsWithLock(items)
+			d.PutQuInItems(items)
 		default:
 			return
 		}

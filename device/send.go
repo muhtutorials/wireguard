@@ -473,13 +473,14 @@ func (peer *Peer) RoutineSendToPeer(maxBatchSize int) {
 	device := peer.device
 	defer func() {
 		// without defer, if Done() panicked, the log message wouldn't be printed
-		defer device.log.Verbosef("%v - Routine: sequential sender - stopped", peer)
+		defer device.log.Verbosef("%v - Routine: sender to peer - stopped", peer)
 		peer.stopping.Done()
 	}()
-	device.log.Verbosef("%v - Routine: sequential sender - started", peer)
+	device.log.Verbosef("%v - Routine: sender to peer - started", peer)
 	bufs := make([][]byte, 0, maxBatchSize)
 	for items := range peer.qus.out.c {
 		bufs = bufs[:0]
+		// nil value is a signal to exit routine sent by Peer.Stop()
 		if items == nil {
 			return
 		}

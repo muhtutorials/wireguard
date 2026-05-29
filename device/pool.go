@@ -2,6 +2,9 @@ package device
 
 import "sync"
 
+// `0` allows for infinite memory growth
+const MaxPoolItems = 0
+
 type WaitPool struct {
 	pool sync.Pool
 	cond sync.Cond
@@ -42,28 +45,30 @@ func (p *WaitPool) Put(val any) {
 }
 
 func (d *Device) InitPools() {
-	d.pools.quOutItemsWithLock = NewWaitPool(PreallocatedBufsPerPool, func() any {
-		items := make([]*QuOutItem, 0, d.BatchSize())
-		return &QuOutItemsWithLock{items: items}
+	d.pools.quOutItemsWithLock = NewWaitPool(MaxPoolItems, func() any {
+		return &QuOutItemsWithLock{
+			items: make([]*QuOutItem, 0, d.BatchSize()),
+		}
 	})
-	d.pools.quInItemsWithLock = NewWaitPool(PreallocatedBufsPerPool, func() any {
-		items := make([]*QuInItem, 0, d.BatchSize())
-		return &QuInItemsWithLock{items: items}
+	d.pools.quInItemsWithLock = NewWaitPool(MaxPoolItems, func() any {
+		return &QuInItemsWithLock{
+			items: make([]*QuInItem, 0, d.BatchSize()),
+		}
 	})
-	d.pools.quOutItems = NewWaitPool(PreallocatedBufsPerPool, func() any {
+	d.pools.quOutItems = NewWaitPool(MaxPoolItems, func() any {
 		return new(QuOutItem)
 	})
-	d.pools.quInItems = NewWaitPool(PreallocatedBufsPerPool, func() any {
+	d.pools.quInItems = NewWaitPool(MaxPoolItems, func() any {
 		return new(QuInItem)
 	})
-	d.pools.messageBufs = NewWaitPool(PreallocatedBufsPerPool, func() any {
+	d.pools.messageBufs = NewWaitPool(MaxPoolItems, func() any {
 		return new([MaxMessageSize]byte)
 	})
 }
 
 func (d *Device) GetQuOutItemsWithLock() *QuOutItemsWithLock {
 	items := d.pools.quOutItemsWithLock.Get().(*QuOutItemsWithLock)
-	// lock is not released in RoutineSequentialSender, so we just
+	// lock is not released in RoutineSendToPeer, so we just
 	// reinitialize the mutex when we get the items again
 	items.Mutex = sync.Mutex{}
 	return items
@@ -117,18 +122,18 @@ func (d *Device) PutMessageBuf(msg *[MaxMessageSize]byte) {
 	d.pools.messageBufs.Put(msg)
 }
 
-func (d *Device) PutQuOutItems(items *QuOutItemsWithLock) {
-	for _, item := range items.items {
+func (d *Device) PutQuOutItems(q *QuOutItemsWithLock) {
+	for _, item := range q.items {
 		d.PutMessageBuf(item.buf)
 		d.PutQuOutItem(item)
 	}
-	d.PutQuOutItemsWithLock(items)
+	d.PutQuOutItemsWithLock(q)
 }
 
-func (d *Device) PutQuInItems(items *QuInItemsWithLock) {
-	for _, item := range items.items {
+func (d *Device) PutQuInItems(q *QuInItemsWithLock) {
+	for _, item := range q.items {
 		d.PutMessageBuf(item.buf)
 		d.PutQuInItem(item)
 	}
-	d.PutQuInItemsWithLock(items)
+	d.PutQuInItemsWithLock(q)
 }

@@ -27,17 +27,17 @@ func (d *Device) RoutineTUNEventReader() {
 				continue
 			}
 			if mtu < 0 {
-				d.log.Errorf("MTU not updated to negative value: %v", mtu)
+				d.log.Errorf("MTU can't be updated to a negative value: %v", mtu)
 				continue
 			}
-			var tooLarge string
+			var tooLargeStr string
 			if mtu > MaxContentSize {
-				tooLarge = fmt.Sprintf(" (too large, capped at %v)", MaxContentSize)
 				mtu = MaxContentSize
+				tooLargeStr = fmt.Sprintf(" (too large, capped at %v)", MaxContentSize)
 			}
 			old := d.tun.mtu.Swap(int32(mtu))
 			if int(old) != mtu {
-				d.log.Verbosef("MTU updated: %v%s", mtu, tooLarge)
+				d.log.Verbosef("MTU updated: %v%s", mtu, tooLargeStr)
 			}
 		}
 	}

@@ -45,9 +45,9 @@ const (
 	// which is equal MessageTransportSize)
 	MinMessageSize = MessageKeepaliveSize
 	// maximum size of transport message (largest possible UDP datagram)
-	MaxMessageSize = MaxSegmentSize
+	MaxMessageSize = (1 << 16) - 1
 	// maximum size of transport message content
-	MaxContentSize = MaxSegmentSize - MessageTransportSize
+	MaxContentSize = MaxMessageSize - MessageTransportSize
 )
 
 // implementation constants

@@ -112,9 +112,9 @@ type pools struct {
 }
 
 type deviceQus struct {
-	handshake  *quHandshake
 	encryption *quOut
 	decryption *quIn
+	handshake  *quHandshake
 }
 
 func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
