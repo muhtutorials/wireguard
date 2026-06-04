@@ -203,7 +203,7 @@ func main() {
 		process.Release()
 		return
 	}
-	device := device.NewDevice(tunDevice, conn.New(), logger)
+	device := device.NewDevice(conn.New(), tunDevice, logger)
 	logger.Verbosef("Device started")
 	errs := make(chan error)
 	term := make(chan os.Signal, 1)

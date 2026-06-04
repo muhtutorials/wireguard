@@ -9,63 +9,27 @@ import (
 
 const (
 	QuStagedSize    = conn.BatchSize
+	QuHandshakeSize = 1024
 	QuOutSize       = 1024
 	QuInSize        = 1024
-	QuHandshakeSize = 1024
 )
 
-// quOut is a channel of QuOutItems awaiting encryption.
-// quOut is ref-counted using its `wg` field.
-// quOut created with newQuOut has one reference.
+// qu is a channel of items awaiting encryption or decryption.
+// qu is ref-counted using its `wg` field.
+// qu created with newQu has one reference.
 // Every additional writer must call wg.Add(1).
 // Every completed writer must call wg.Done().
 // When no further writers will be added,
 // call wg.Done() to remove the initial reference.
 // When the ref-count hits 0, the queue's channel is closed.
-type quOut struct {
-	c  chan *QuOutItemsWithLock
+type qu[T any] struct {
+	c  chan T
 	wg sync.WaitGroup
 }
 
-func newQuOut() *quOut {
-	q := &quOut{
-		c: make(chan *QuOutItemsWithLock, QuOutSize),
-	}
-	q.wg.Add(1)
-	go func() {
-		q.wg.Wait()
-		close(q.c)
-	}()
-	return q
-}
-
-// QuIn is similar to quOut. See above.
-type quIn struct {
-	c  chan *QuInItemsWithLock
-	wg sync.WaitGroup
-}
-
-func newQuIn() *quIn {
-	q := &quIn{
-		c: make(chan *QuInItemsWithLock, QuInSize),
-	}
-	q.wg.Add(1)
-	go func() {
-		q.wg.Wait()
-		close(q.c)
-	}()
-	return q
-}
-
-// quHandshake is similar to quOut. See above.
-type quHandshake struct {
-	c  chan QuHandshake
-	wg sync.WaitGroup
-}
-
-func newQuHandshake() *quHandshake {
-	q := &quHandshake{
-		c: make(chan QuHandshake, QuHandshakeSize),
+func newQu[T any](size int) *qu[T] {
+	q := &qu[T]{
+		c: make(chan T, size),
 	}
 	q.wg.Add(1)
 	go func() {

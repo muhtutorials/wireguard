@@ -29,21 +29,23 @@ import (
 // the wg0 TUN device. Wireguard simply reads the raw IP packets
 // from this device.
 
-// server gets an encrypted message from the bind, decrypts it,
-// sends it via TUN to the website, then reads the response from TUN,
-// encrypts it, and sends it back to the peer via bind
+// Device gets an encrypted message from a peer via Bind,
+// decrypts it, sends it via TUN to internet, then reads
+// the response from TUN, encrypts it, and sends it back
+// to the peer via Bind.
 type Device struct {
 	state state
-	// handles the encrypted WireGuard traffic to and from peers
+	// handles the encrypted traffic to and from peers
 	net deviceNet
-	// handles the plain-text internet requests and responses
-	tun         deviceTun
-	keys        keys // static identity
+	// handles the plaintext internet requests and responses
+	tun deviceTun
+	// static identity
+	keys        keys
 	peers       peers
 	rateLimiter rateLimiter
 	// allowed IPs
 	router Router
-	// connects receiver to peer, handshake and keypair
+	// identifies peer, handshake and keypair by receiver in message
 	sessions      SessionMap
 	pools         pools
 	qus           deviceQus
@@ -55,29 +57,35 @@ type Device struct {
 
 type state struct {
 	// state holds the device's state. It is accessed atomically.
-	// Use the device.deviceState method to read it.
-	// device.deviceState does not acquire the mutex, so it captures only a snapshot.
-	// During state transitions, the state variable is updated before the device itself.
-	// The state is thus either the current state of the device or
-	// the intended future state of the device.
+	// Use the device.deviceState method to read it. device.deviceState
+	// does not acquire the mutex, so it captures only a snapshot.
+	// During state transitions, the state variable is updated before
+	// the device itself. The state is thus either the current state
+	// of the device or the intended future state of the device.
 	// For example, while executing a call to Up, state will be deviceStateUp.
 	// There is no guarantee that that intended future state of the device
-	// will become the actual state; Up can fail.
-	// The device can also change state multiple times between time of check and time of use.
+	// will become the actual state, Up can fail. The device can also
+	// change state multiple times between time of check and time of use.
 	// Unsynchronized uses of state must therefore be advisory/best-effort only.
-	val atomic.Uint32 // actually a deviceState, but typed uint32 for convenience
-	// stopping blocks until all inputs to Device have been closed.
+	//
+	// actually a deviceState, but typed uint32 for convenience
+	val atomic.Uint32
+	// stopping blocks until RoutineReceiveFromInternet
+	// routine has been stopped.
 	stopping sync.WaitGroup
-	// protects state changes.
+	// protects state changes
 	sync.Mutex
 }
 
+// deviceNet handles the encrypted traffic to and from peers
 type deviceNet struct {
 	bind          conn.Bind // bind interface
+	port          uint16    // listening port
+	fwmark        uint32    // mark value (0 = disabled)
 	netlinkCancel *rwcancel.RWCancel
-	port          uint16 // listening port
-	fwmark        uint32 // mark value (0 = disabled)
-	stopping      sync.WaitGroup
+	// stopping blocks until all RoutineReceiveFromPeers
+	// routines have been stopped.
+	stopping sync.WaitGroup
 	sync.RWMutex
 }
 
@@ -112,12 +120,12 @@ type pools struct {
 }
 
 type deviceQus struct {
-	encryption *quOut
-	decryption *quIn
-	handshake  *quHandshake
+	handshake  *qu[QuHandshake]
+	encryption *qu[*QuOutItemsWithLock]
+	decryption *qu[*QuInItemsWithLock]
 }
 
-func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
+func NewDevice(bind conn.Bind, tunDevice tun.Device, logger *Logger) *Device {
 	d := new(Device)
 	d.state.val.Store(uint32(deviceStateDown))
 	d.net.bind = bind
@@ -132,32 +140,44 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	d.rateLimiter.val.Init()
 	d.sessions.Init()
 	d.InitPools()
-	// create queues
-	d.qus.handshake = newQuHandshake()
-	d.qus.encryption = newQuOut()
-	d.qus.decryption = newQuIn()
+	// Create queues.
+	// handshake's and decryption's channels are closed
+	// by RoutineReceiveFromPeers functions (for IPv4 and IPv6),
+	// which send to them, and by Device.Close(), which decrements
+	// ref-count incremented during queue initialization.
+	// encryption's channel is closed by RoutineReceiveFromInternet,
+	// which sends to it through Peer.SendStagedPackets, then by
+	// Device.Close(), which decrements ref-count incremented during
+	// queue initialization, by Peer.Stop() and by RoutineHandshake,
+	// which closes `encryption` when `handshake` is closed.
+	d.qus.handshake = newQu[QuHandshake](QuHandshakeSize)
+	d.qus.encryption = newQu[*QuOutItemsWithLock](QuOutSize)
+	d.qus.decryption = newQu[*QuInItemsWithLock](QuInSize)
 	d.closed = make(chan struct{})
 	d.log = logger
 	// start workers
 	numCPU := runtime.NumCPU()
-	d.state.stopping.Wait()
 	d.qus.encryption.wg.Add(numCPU) // one for each RoutineHandshake
+	// Ensures that when the device is reinitialized, all previous
+	// goroutines have fully exited before new ones are launched.
+	d.state.stopping.Wait()
 	for i := range numCPU {
 		go d.RoutineHandshake(i + 1)
 		go d.RoutineEncryption(i + 1)
 		go d.RoutineDecryption(i + 1)
 	}
-	d.state.stopping.Add(1)    // RoutineReadFromTUN
-	d.qus.encryption.wg.Add(1) // RoutineReadFromTUN
-	go d.RoutineTUNEventReader()
+	// both decremented by RoutineReceiveFromInternet
+	d.qus.encryption.wg.Add(1)
+	d.state.stopping.Add(1)
 	go d.RoutineReceiveFromInternet()
+	go d.RoutineTUNEventReader()
 	return d
 }
 
 func (d *Device) SetPrivateKey(priv NoisePrivateKey) error {
 	d.keys.Lock()
 	defer d.keys.Unlock()
-	if priv.Equals(d.keys.privateKey) {
+	if d.keys.privateKey.Equals(priv) {
 		return nil
 	}
 	d.peers.Lock()
@@ -169,32 +189,31 @@ func (d *Device) SetPrivateKey(priv NoisePrivateKey) error {
 		lockedPeers = append(lockedPeers, peer)
 	}
 	// remove peers with matching public keys
-	publicKey := priv.publicKey()
+	pub := priv.publicKey()
 	for key, peer := range d.peers.val {
-		// Device's public key shoudn't be equal to peer's public key.
+		// Device's public key shouldn't be equal to peer's public key.
 		// Checked because:
 		// 	Defensive programming (handling impossible cases gracefully).
 		// 	Configuration error protection.
 		// 	Testing scenarios.
 		// 	Logical completeness (the system shouldn't peer with
 		//  itself even if it somehow becomes possible).
-		if peer.handshake.remoteStatic.Equals(publicKey) {
+		if peer.handshake.remoteStatic.Equals(pub) {
 			// We need to release the lock here because:
-			// 	removePeerLocked -> peer.Stop() -> peer.ZeroAndFlushAll() ->
+			// 	removePeerLocked -> peer.Stop() ->
 			// 	-> peer.ZeroAndFlushAll() -> handshake.Lock()
 			peer.handshake.RUnlock()
-			removePeerLocked(d, peer, key)
+			d.removePeerLocked(peer, key)
 			peer.handshake.RLock()
 		}
 	}
-	// update key material
 	d.keys.privateKey = priv
-	d.keys.publicKey = publicKey
-	d.cookieChecker.Init(publicKey)
+	d.keys.publicKey = pub
+	d.cookieChecker.Init(pub)
 	expiredPeers := make([]*Peer, 0, len(d.peers.val))
 	for _, peer := range d.peers.val {
-		hs := &peer.handshake
-		hs.precomputedSharedSecret, _ = d.keys.privateKey.sharedSecret(hs.remoteStatic)
+		peer.handshake.precomputedSharedSecret, _ =
+			d.keys.privateKey.sharedSecret(peer.handshake.remoteStatic)
 		expiredPeers = append(expiredPeers, peer)
 	}
 	for _, peer := range lockedPeers {
@@ -206,7 +225,7 @@ func (d *Device) SetPrivateKey(priv NoisePrivateKey) error {
 	return nil
 }
 
-// deviceState represents the state of a Device.
+// deviceState represents the state of the device.
 // There are three states: down, up, closed.
 // Transitions:
 //
@@ -221,8 +240,8 @@ const (
 	deviceStateClosed
 )
 
-// getState returns device.state.val as a deviceState
-// See those docs for how to interpret this value.
+// getState returns device.state.val as a deviceState.
+// See device.state.val comments for how to interpret this value.
 func (d *Device) getState() deviceState {
 	return deviceState(d.state.val.Load())
 }
@@ -258,7 +277,7 @@ func (d *Device) changeState(new deviceState) (err error) {
 		if err == nil {
 			break
 		}
-		fallthrough // up failed; bring the device all the way back down
+		fallthrough // up failed; bring the device back down
 	case deviceStateDown:
 		d.state.val.Store(uint32(deviceStateDown))
 		errDown := d.downLocked()
@@ -266,7 +285,12 @@ func (d *Device) changeState(new deviceState) (err error) {
 			err = errDown
 		}
 	}
-	d.log.Verbosef("Interface state was %s, requested %s, now %s", old, new, d.getState())
+	d.log.Verbosef(
+		"Interface state was %s, requested %s, now %s",
+		old,
+		new,
+		d.getState(),
+	)
 	return
 }
 
@@ -274,7 +298,7 @@ func (d *Device) changeState(new deviceState) (err error) {
 // whether it succeeded. The caller must hold d.state
 // mutex and is responsible for updating d.state.val.
 func (d *Device) upLocked() error {
-	if err := d.BindUpdate(); err != nil {
+	if err := d.BindOpen(); err != nil {
 		d.log.Errorf("Unable to update bind: %v", err)
 		return err
 	}
@@ -303,10 +327,10 @@ func (d *Device) downLocked() error {
 		d.log.Errorf("Bind close failed: %v", err)
 	}
 	d.peers.RLock()
+	defer d.peers.RUnlock()
 	for _, peer := range d.peers.val {
 		peer.Stop()
 	}
-	d.peers.RUnlock()
 	return err
 }
 
@@ -318,7 +342,7 @@ func (d *Device) Down() error {
 	return d.changeState(deviceStateDown)
 }
 
-// IsUnderLoad checks if device is currently under load.
+// IsUnderLoad checks if the device is currently under load.
 func (d *Device) IsUnderLoad() bool {
 	now := time.Now()
 	// Check the length of the handshake queue.
@@ -352,7 +376,7 @@ func (d *Device) RemovePeer(key NoisePublicKey) {
 	// stop peer and remove from routing
 	peer, ok := d.peers.val[key]
 	if ok {
-		removePeerLocked(d, peer, key)
+		d.removePeerLocked(peer, key)
 	}
 }
 
@@ -360,7 +384,7 @@ func (d *Device) RemoveAllPeers() {
 	d.peers.Lock()
 	defer d.peers.Unlock()
 	for key, peer := range d.peers.val {
-		removePeerLocked(d, peer, key)
+		d.removePeerLocked(peer, key)
 	}
 	// The old map might have been large with many entries.
 	// Creating a fresh empty map ensures that the old map
@@ -369,12 +393,12 @@ func (d *Device) RemoveAllPeers() {
 }
 
 // must hold device.peers.Lock()
-func removePeerLocked(device *Device, peer *Peer, key NoisePublicKey) {
+func (d *Device) removePeerLocked(peer *Peer, key NoisePublicKey) {
 	// stop routing and processing of packets
-	device.router.RemoveByPeer(peer)
+	d.router.RemoveByPeer(peer)
 	peer.Stop()
 	// remove from peer map
-	delete(device.peers.val, key)
+	delete(d.peers.val, key)
 }
 
 func (d *Device) Close() {
@@ -387,14 +411,15 @@ func (d *Device) Close() {
 	}
 	d.state.val.Store(uint32(deviceStateClosed))
 	d.log.Verbosef("Device closing")
-	d.tun.device.Close()
 	d.downLocked()
+	d.tun.device.Close()
 	// Remove peers before closing queues,
 	// because peers assume that queues are active.
 	d.RemoveAllPeers()
 	// We kept a reference to the encryption and decryption queues,
 	// in case we started any new peers that might write to them.
 	// No new peers are coming; we are done with these queues.
+	// Done() decrements ref-count which was incremented during newQu call.
 	d.qus.handshake.wg.Done()
 	d.qus.encryption.wg.Done()
 	d.qus.decryption.wg.Done()
@@ -406,60 +431,23 @@ func (d *Device) Close() {
 
 // closeBindLocked closes the device's net.bind.
 // The caller must hold the net mutex.
-func closeBindLocked(d *Device) error {
+func (d *Device) closeBindLocked() error {
 	var err error
-	nt := &d.net
-	if nt.netlinkCancel != nil {
-		nt.netlinkCancel.Cancel()
+	if d.net.bind != nil {
+		err = d.net.bind.Close()
 	}
-	if nt.bind != nil {
-		err = nt.bind.Close()
+	if d.net.netlinkCancel != nil {
+		d.net.netlinkCancel.Cancel()
 	}
-	nt.stopping.Wait()
+	d.net.stopping.Wait()
 	return err
 }
 
-func (d *Device) Bind() conn.Bind {
-	d.net.Lock()
-	defer d.net.Unlock()
-	return d.net.bind
-}
-
-// BindSetMark sets a firewall mark (or fwmark) that can be attached
-// to network packets in the Linux kernel. It's used for:
-// - Policy routing - Direct packets through specific routing tables based on their mark.
-// - Packet filtering - Apply different firewall rules to marked packets.
-// - Traffic control - Shape or prioritize marked traffic differently.
-// Set via CLI.
-func (d *Device) BindSetMark(mark uint32) error {
-	d.net.Lock()
-	defer d.net.Unlock()
-	// check if modified
-	if d.net.fwmark == mark {
-		return nil
-	}
-	// update fwmark on existing bind
-	d.net.fwmark = mark
-	if d.isUp() && d.net.bind != nil {
-		if err := d.net.bind.SetMark(mark); err != nil {
-			return err
-		}
-	}
-	// clear cached source addresses
-	d.peers.RLock()
-	for _, peer := range d.peers.val {
-		peer.markEndpointSrcForClearing()
-	}
-	d.peers.RUnlock()
-	return nil
-}
-
-// BindUpdate updates bind's port when changed via CLI.
-func (d *Device) BindUpdate() error {
+func (d *Device) BindOpen() error {
 	d.net.Lock()
 	defer d.net.Unlock()
 	// close existing sockets
-	if err := closeBindLocked(d); err != nil {
+	if err := d.closeBindLocked(); err != nil {
 		return err
 	}
 	// open new sockets
@@ -468,8 +456,8 @@ func (d *Device) BindUpdate() error {
 	}
 	// bind to new port
 	var (
-		err     error
 		recvFns []conn.ReceiveFunc
+		err     error
 	)
 	nt := &d.net
 	recvFns, nt.port, err = nt.bind.Open(nt.port)
@@ -495,13 +483,13 @@ func (d *Device) BindUpdate() error {
 		peer.markEndpointSrcForClearing()
 	}
 	d.peers.RUnlock()
-	// start receiving routines
-	d.net.stopping.Add(len(recvFns))
-	// each RoutineReceiveIncoming goroutine writes to device.qus.handshake
+	// each RoutineReceiveFromPeers goroutine writes to d.qus.handshake
 	d.qus.handshake.wg.Add(len(recvFns))
-	// each RoutineReceiveIncoming goroutine writes to device.qus.decryption
+	// each RoutineReceiveFromPeers goroutine writes to d.qus.decryption
 	d.qus.decryption.wg.Add(len(recvFns))
+	d.net.stopping.Add(len(recvFns))
 	batchSize := nt.bind.BatchSize()
+	// start receiving routines
 	for _, fn := range recvFns {
 		go d.RoutineReceiveFromPeers(batchSize, fn)
 	}
@@ -509,10 +497,48 @@ func (d *Device) BindUpdate() error {
 	return nil
 }
 
+// BindSetMark sets a firewall mark (or fwmark) that
+// can be attached to network packets in the Linux kernel.
+// It's used for:
+//   - Policy routing - Direct packets through specific routing tables
+//     based on their mark.
+//   - Packet filtering - Apply different firewall rules to marked packets.
+//   - Traffic control - Shape or prioritize marked traffic differently.
+//
+// Set via CLI.
+func (d *Device) BindSetMark(mark uint32) error {
+	d.net.Lock()
+	defer d.net.Unlock()
+	// check if modified
+	if d.net.fwmark == mark {
+		return nil
+	}
+	// update fwmark on existing bind
+	d.net.fwmark = mark
+	if d.isUp() && d.net.bind != nil {
+		if err := d.net.bind.SetMark(mark); err != nil {
+			return err
+		}
+	}
+	// clear cached source addresses
+	d.peers.RLock()
+	for _, peer := range d.peers.val {
+		peer.markEndpointSrcForClearing()
+	}
+	d.peers.RUnlock()
+	return nil
+}
+
 func (d *Device) BindClose() error {
 	d.net.Lock()
 	defer d.net.Unlock()
-	return closeBindLocked(d)
+	return d.closeBindLocked()
+}
+
+func (d *Device) Bind() conn.Bind {
+	d.net.Lock()
+	defer d.net.Unlock()
+	return d.net.bind
 }
 
 func (d *Device) Wait() chan struct{} {
@@ -525,6 +551,6 @@ func (d *Device) Wait() chan struct{} {
 // the lifetime of the device.
 func (d *Device) BatchSize() int {
 	size := d.net.bind.BatchSize()
-	dSize := d.tun.device.BatchSize()
-	return max(size, dSize)
+	size2 := d.tun.device.BatchSize()
+	return max(size, size2)
 }

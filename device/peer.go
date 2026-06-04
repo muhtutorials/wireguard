@@ -117,7 +117,12 @@ func (peer *Peer) String() string {
 	// except that it is considerably more efficient.
 	src := peer.handshake.remoteStatic
 	b64 := func(input byte) byte {
-		return input + 'A' + byte(((25-int(input))>>8)&6) - byte(((51-int(input))>>8)&75) - byte(((61-int(input))>>8)&15) + byte(((62-int(input))>>8)&3)
+		return input +
+			'A' +
+			byte(((25-int(input))>>8)&6) -
+			byte(((51-int(input))>>8)&75) -
+			byte(((61-int(input))>>8)&15) +
+			byte(((62-int(input))>>8)&3)
 	}
 	b := []byte("peer(____…____)")
 	const first = len("peer(")
@@ -159,11 +164,11 @@ func (peer *Peer) Start() {
 	peer.handshake.Lock()
 	// Set the lastSentHandshake timestamp to a time
 	// in the past to force an immediate handshake.
-	// RekeyTimeout (=5s) is the interval after which a new handshake
-	// is initiated if no data has been sent/received.
+	// RekeyTimeout (=5s) is the interval after which a new
+	// handshake is initiated if no data has been sent/received.
 	// Adding +1 second ensures it's definitely expired
 	// By subtracting (RekeyTimeout + 1s), we guarantee that
-	// lastSentHandshake is older than RekeyTimeout relative to now().
+	// lastSentHandshake is older than RekeyTimeout relative to now.
 	peer.handshake.lastSentHandshake = time.Now().Add(-(RekeyTimeout + time.Second))
 	peer.handshake.Unlock()
 	peer.device.qus.encryption.wg.Add(1) // keep encryption queue open for our writes
@@ -251,7 +256,7 @@ func (peer *Peer) ExpireCurrentKeypairs() {
 	peer.device.sessions.Delete(handshake.localIndex)
 	handshake.Clear()
 	// see Start method for explanation
-	peer.handshake.lastSentHandshake = time.Now().Add(-(RekeyTimeout + time.Second))
+	handshake.lastSentHandshake = time.Now().Add(-(RekeyTimeout + time.Second))
 	handshake.Unlock()
 	keypairs := &peer.keypairs
 	keypairs.Lock()

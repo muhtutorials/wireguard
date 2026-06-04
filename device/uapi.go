@@ -426,7 +426,7 @@ func (d *Device) handleDeviceLine(key, value string) error {
 		d.net.Lock()
 		d.net.port = uint16(port)
 		d.net.Unlock()
-		if err := d.BindUpdate(); err != nil {
+		if err := d.BindOpen(); err != nil {
 			return ipcErrorf(
 				ipc.IpcErrorPortInUse,
 				"failed to set listen_port: %w",

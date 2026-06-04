@@ -80,27 +80,6 @@ func (item *QuOutItem) zeroOutPointers() {
 	item.peer = nil
 }
 
-// SendKeepalive queues a keepalive if no packets are queued for peer.
-func (peer *Peer) SendKeepalive() {
-	if len(peer.qus.staged) == 0 && peer.isRunning.Load() {
-		item := peer.device.NewQuOutItem()
-		items := peer.device.GetQuOutItemsWithLock()
-		items.items = append(items.items, item)
-		select {
-		case peer.qus.staged <- items:
-			peer.device.log.Verbosef(
-				"%v - Sending keepalive packet",
-				peer,
-			)
-		default:
-			peer.device.PutMessageBuf(item.buf)
-			peer.device.PutQuOutItem(item)
-			peer.device.PutQuOutItemsWithLock(items)
-		}
-	}
-	peer.SendStagedPackets()
-}
-
 func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	if !isRetry {
 		peer.timers.handshakeAttempts.Store(0)
@@ -211,6 +190,25 @@ func (d *Device) SendHandshakeCookie(hs *QuHandshake) error {
 	return nil
 }
 
+// SendKeepalive queues a keepalive if no packets are queued for peer.
+func (peer *Peer) SendKeepalive() {
+	if len(peer.qus.staged) == 0 && peer.isRunning.Load() {
+		item := peer.device.NewQuOutItem()
+		items := peer.device.GetQuOutItemsWithLock()
+		items.items = append(items.items, item)
+		select {
+		case peer.qus.staged <- items:
+			peer.device.log.Verbosef(
+				"%v - Sending keepalive packet",
+				peer,
+			)
+		default:
+			peer.device.PutQuOutItemsWithLock(items)
+		}
+	}
+	peer.SendStagedPackets()
+}
+
 func (peer *Peer) keepKeyFreshSending() {
 	keypair := peer.keypairs.Current()
 	if keypair == nil {
@@ -227,11 +225,11 @@ func (peer *Peer) keepKeyFreshSending() {
 // Device runs just one instance of this routine.
 func (d *Device) RoutineReceiveFromInternet() {
 	defer func() {
-		d.log.Verbosef("Routine: TUN reader - stopped")
-		d.state.stopping.Done()
+		d.log.Verbosef("Routine: internet receiver (TUN reader) - stopped")
 		d.qus.encryption.wg.Done()
+		d.state.stopping.Done()
 	}()
-	d.log.Verbosef("Routine: TUN reader - started")
+	d.log.Verbosef("Routine: internet receiver (TUN reader) - started")
 	var (
 		batchSize = d.BatchSize()
 		items     = make([]*QuOutItem, batchSize)
