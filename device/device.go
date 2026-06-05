@@ -311,7 +311,7 @@ func (d *Device) upLocked() error {
 	defer d.peers.RUnlock()
 	for _, peer := range d.peers.val {
 		peer.Start()
-		if peer.KeepaliveInterval.Load() > 0 {
+		if peer.keepaliveInterval.Load() > 0 {
 			peer.SendKeepalive()
 		}
 	}

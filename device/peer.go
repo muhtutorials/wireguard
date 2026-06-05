@@ -19,13 +19,17 @@ type Peer struct {
 	timers            timers
 	nodes             list.List
 	cookieGenerator   CookieGenerator
-	txBytes           atomic.Uint64 // bytes send to peer (endpoint)
-	rxBytes           atomic.Uint64 // bytes received from peer
 	isRunning         atomic.Bool
 	lastHandshake     atomic.Int64 // nanoseconds since epoch
-	KeepaliveInterval atomic.Uint32
-	stopping          sync.WaitGroup // routines pending stop
-	sync.Mutex                       // protects against concurrent Start/Stop
+	keepaliveInterval atomic.Uint32
+	// bytes sent to peer
+	txBytes atomic.Uint64
+	// bytes received from peer
+	rxBytes atomic.Uint64
+	// waits for RoutineSendToPeer and RoutineSendToInternet to finish
+	stopping sync.WaitGroup
+	// protects against concurrent start/stop
+	sync.Mutex
 }
 
 type endpoint struct {
@@ -40,7 +44,7 @@ type peerQus struct {
 	// peer's received packets before handshake was
 	// established or during reestablishing handshake
 	staged chan *QuOutItemsWithLock
-	// sequential ordering of UDP transmission
+	// sequential ordering of UDP transmission (writing)
 	out *quOutFlush
 	// sequential ordering of TUN writing
 	in *quInFlush
@@ -76,32 +80,26 @@ func (d *Device) NewPeer(pub NoisePublicKey) (*Peer, error) {
 	if len(d.peers.val) >= MaxPeers {
 		return nil, errors.New("too many peers")
 	}
-	// create peer
-	peer := new(Peer)
-	peer.device = d
-	peer.qus.staged = make(chan *QuOutItemsWithLock, QuStagedSize)
-	peer.qus.out = newQuOutFlush(d)
-	peer.qus.in = newQuInFlush(d)
-	peer.cookieGenerator.Init(pub)
 	// map public key
 	_, ok := d.peers.val[pub]
 	if ok {
 		return nil, errors.New("adding existing peer")
 	}
+	// create peer
+	peer := new(Peer)
+	peer.device = d
 	// pre-compute DH
 	handshake := &peer.handshake
 	handshake.Lock()
 	handshake.precomputedSharedSecret, _ = d.keys.privateKey.sharedSecret(pub)
 	handshake.remoteStatic = pub
 	handshake.Unlock()
-	// reset endpoint
-	// NOTE: I'm not sure it's necessary.
-	peer.endpoint.Lock()
-	peer.endpoint.val = nil
-	peer.endpoint.clearSrcOnTx = false
-	peer.endpoint.Unlock()
+	peer.qus.staged = make(chan *QuOutItemsWithLock, QuStagedSize)
+	peer.qus.out = newQuOutFlush(d)
+	peer.qus.in = newQuInFlush(d)
 	// init timers
 	peer.timersInit()
+	peer.cookieGenerator.Init(pub)
 	// add peer
 	d.peers.val[pub] = peer
 	return peer, nil
@@ -151,10 +149,10 @@ func (peer *Peer) Start() {
 	}
 	device := peer.device
 	device.log.Verbosef("%v - Starting", peer)
-	// reset routine state
-	// Wait() blocks until any previous goroutines from a previous
+	// Reset routine state.
+	// Wait() blocks until any routines from a previous
 	// start have completely finished.
-	// Only after they're done, we add 2 for the new goroutines we're about
+	// Only after they're done, we add 2 for the new routines we're about
 	// to launch (RoutineSendToPeer and RoutineSendToInternet).
 	// This prevents resource leaks and ensures we don't have
 	// multiple instances of the same routines running concurrently
@@ -166,15 +164,17 @@ func (peer *Peer) Start() {
 	// in the past to force an immediate handshake.
 	// RekeyTimeout (=5s) is the interval after which a new
 	// handshake is initiated if no data has been sent/received.
-	// Adding +1 second ensures it's definitely expired
+	// Adding +1 second ensures it's definitely expired.
 	// By subtracting (RekeyTimeout + 1s), we guarantee that
 	// lastSentHandshake is older than RekeyTimeout relative to now.
-	peer.handshake.lastSentHandshake = time.Now().Add(-(RekeyTimeout + time.Second))
+	peer.handshake.lastSentHandshake =
+		time.Now().Add(-(RekeyTimeout + time.Second))
 	peer.handshake.Unlock()
-	peer.device.qus.encryption.wg.Add(1) // keep encryption queue open for our writes
-	peer.timersStart()
+	// keep encryption queue open for our writes
+	peer.device.qus.encryption.wg.Add(1)
 	device.flushQuOut(peer.qus.out)
 	device.flushQuIn(peer.qus.in)
+	peer.timersStart()
 	// Use the device batch size, not the bind batch size,
 	// as the device size is the size of the batch pools.
 	batchSize := peer.device.BatchSize()
@@ -190,17 +190,16 @@ func (peer *Peer) Send(bufs [][]byte) error {
 		return nil
 	}
 	peer.endpoint.Lock()
-	endpoint := peer.endpoint.val
-	if endpoint == nil {
+	if peer.endpoint.val == nil {
 		peer.endpoint.Unlock()
 		return errors.New("no known endpoint for peer")
 	}
 	if peer.endpoint.clearSrcOnTx {
-		endpoint.ClearSrc()
+		peer.endpoint.val.ClearSrc()
 		peer.endpoint.clearSrcOnTx = false
 	}
 	peer.endpoint.Unlock()
-	err := peer.device.net.bind.Send(bufs, endpoint)
+	err := peer.device.net.bind.Send(bufs, peer.endpoint.val)
 	if err == nil {
 		var totalLen uint64
 		for _, buf := range bufs {

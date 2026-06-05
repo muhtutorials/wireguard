@@ -129,7 +129,7 @@ func expiredSendKeepalive(peer *Peer) {
 // expiredKeepalive is persistent keepalive.
 // This is a user-configured feature to maintain NAT mappings.
 func expiredKeepalive(peer *Peer) {
-	if peer.KeepaliveInterval.Load() > 0 {
+	if peer.keepaliveInterval.Load() > 0 {
 		peer.SendKeepalive()
 	}
 }
@@ -250,7 +250,7 @@ func (peer *Peer) timersAuthenticatedPacketReceived() {
 // Should be called before a packet with authentication
 // (keepalive, data, or handshake) is sent, or after one is received.
 func (peer *Peer) timersAuthenticatedPacketTraversal() {
-	keepalive := peer.KeepaliveInterval.Load()
+	keepalive := peer.keepaliveInterval.Load()
 	if keepalive > 0 && peer.timersActive() {
 		peer.timers.keepalive.Mod(time.Duration(keepalive) * time.Second)
 	}

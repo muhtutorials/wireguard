@@ -364,6 +364,7 @@ top:
 		return
 	}
 	keypair := peer.keypairs.Current()
+	// TODO: keypair == nil (ZeroAndFlushAll) vs RejectAfterMessages (ExpireCurrentKeypairs)
 	if keypair == nil ||
 		keypair.sendNonce.Load() >= RejectAfterMessages ||
 		time.Since(keypair.createdAt) >= RejectAfterTime {

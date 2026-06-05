@@ -118,7 +118,7 @@ func (d *Device) IpcGetOperation(w io.Writer) error {
 			sendf("last_handshake_time_nsec=%d", nano)
 			sendf("tx_bytes=%d", peer.txBytes.Load())
 			sendf("rx_bytes=%d", peer.rxBytes.Load())
-			sendf("keepalive_interval=%d", peer.KeepaliveInterval.Load())
+			sendf("keepalive_interval=%d", peer.keepaliveInterval.Load())
 			d.router.PeerNodes(
 				peer,
 				func(prefix netip.Prefix) bool {
@@ -329,7 +329,7 @@ func (d *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error {
 				err,
 			)
 		}
-		old := peer.KeepaliveInterval.Swap(uint32(secs))
+		old := peer.keepaliveInterval.Swap(uint32(secs))
 		// Send immediate keepalive if we're turning it on and before it wasn't on.
 		peer.keepaliveOn = old == 0 && secs != 0
 	case "allowed_ip":
