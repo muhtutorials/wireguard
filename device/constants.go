@@ -7,8 +7,10 @@ import (
 
 // specification constants
 const (
-	// rekey is a new handshake initiation to derive fresh encryption keys
-	RekeyAfterMessages  = (1 << 60)
+	// Rekey is a new handshake initiation to derive fresh encryption keys.
+	// Initiate rekey, but continue sending.
+	RekeyAfterMessages = (1 << 60)
+	// Reject all messages, force handshake.
 	RejectAfterMessages = (1 << 64) - (1 << 13) - 1
 	RekeyAfterTime      = time.Second * 120
 	RekeyAttemptTime    = time.Second * 90

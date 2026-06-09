@@ -425,7 +425,7 @@ func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 				// received an item with the new keypair,
 				// which means handshake is complete
 				peer.timersHandshakeComplete()
-				// TODO: why is it here?
+				// sends rejected packets after deriving new keypair
 				peer.SendStagedPackets()
 			}
 			// MinMessageSize = MessageTransportHeaderSize + chacha20poly1305.Overhead

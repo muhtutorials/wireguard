@@ -51,10 +51,19 @@ type peerQus struct {
 }
 
 type timers struct {
-	newHandshake    *Timer
+	// sends new handshake
+	newHandshake *Timer
+	// Resends new handshake after failure. If resends fail too,
+	// cancels `sendKeepalive`, flushes staged packets and
+	// schedules zeroing out of peer's keys (zeroOutKeys timer).
 	resendHandshake *Timer
-	sendKeepalive   *Timer
-	keepalive       *Timer
+	// Sends keepalive and reschedules another `sendKeepalive`,
+	// if `needAnotherKeepalive` is true.
+	// This is an internal protocol mechanism to detect dead peers.
+	sendKeepalive *Timer
+	// Sends keepalive if `keepaliveInterval` is set.
+	// This is a user-configured feature to maintain NAT mappings.
+	keepalive *Timer
 	// zeroes out peer's keys
 	zeroOutKeys       *Timer
 	handshakeAttempts atomic.Uint32

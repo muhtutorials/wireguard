@@ -68,7 +68,7 @@ const (
 	// size of empty transport message
 	// TODO: what is chacha20poly1305.Overhead?
 	MessageTransportSize = MessageTransportHeaderSize + chacha20poly1305.Overhead
-	// size of keepalive
+	// size of keepalive (MessageTransportHeaderSize + chacha20poly1305.Overhead)
 	MessageKeepaliveSize = MessageTransportSize
 )
 

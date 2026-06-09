@@ -169,7 +169,7 @@ func NewDevice(bind conn.Bind, tunDevice tun.Device, logger *Logger) *Device {
 	// both decremented by RoutineReceiveFromInternet
 	d.qus.encryption.wg.Add(1)
 	d.state.stopping.Add(1)
-	go d.RoutineReceiveFromInternet()
+	go d.RoutineReceiveFromInternet() // TUN reader
 	go d.RoutineTUNEventReader()
 	return d
 }

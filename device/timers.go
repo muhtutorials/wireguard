@@ -178,9 +178,10 @@ func (peer *Peer) timersActive() bool {
 // - They might doubt WE can reach THEM (our outgoing path).
 // - Simple keepalive confirms our return path works.
 
+// Schedules `newHandshake` timer.
 // Should be called after an authenticated data packet is sent.
 // Example:
-// Send data → schedule a handshake in 15 seconds (as a "liveness probe").
+// Send data → schedule a handshake in 15 seconds (as a "aliveness probe").
 // Receive ANY response (data, keepalive, or handshake) before 15 seconds
 // → cancel the handshake.
 // Receive NO response for 15 seconds → handshake timer fires
@@ -219,6 +220,17 @@ func (peer *Peer) timersDataSent() {
 	}
 }
 
+// Cancels `newHandshake` scheduled by `timersDataSent`.
+// Should be called after any type of authenticated
+// packet is received (keepalive, data, or handshake).
+func (peer *Peer) timersAuthenticatedPacketReceived() {
+	if peer.timersActive() {
+		peer.timers.newHandshake.Del()
+	}
+}
+
+// Schedules `sendKeepalive` and sets `needAnotherKeepalive`,
+// if `sendKeepalive` has already been scheduled.
 // Should be called after an authenticated data packet is received.
 func (peer *Peer) timersDataReceived() {
 	if peer.timersActive() {
@@ -231,6 +243,7 @@ func (peer *Peer) timersDataReceived() {
 	}
 }
 
+// Cancels `sendKeepalive` scheduled by `timersDataReceived`.
 // Should be called after any type of authenticated
 // packet is sent (keepalive, data, or handshake).
 func (peer *Peer) timersAuthenticatedPacketSent() {
@@ -239,14 +252,8 @@ func (peer *Peer) timersAuthenticatedPacketSent() {
 	}
 }
 
-// Should be called after any type of authenticated
-// packet is received (keepalive, data, or handshake).
-func (peer *Peer) timersAuthenticatedPacketReceived() {
-	if peer.timersActive() {
-		peer.timers.newHandshake.Del()
-	}
-}
-
+// Schedules `keepalive` timer to fire in `keepaliveInterval`
+// after any authenticated packet was sent or received.
 // Should be called before a packet with authentication
 // (keepalive, data, or handshake) is sent, or after one is received.
 func (peer *Peer) timersAuthenticatedPacketTraversal() {
@@ -256,6 +263,7 @@ func (peer *Peer) timersAuthenticatedPacketTraversal() {
 	}
 }
 
+// Schedules `resendHandshake` after sending handshake.
 // Should be called after a handshake initiation message is sent.
 func (peer *Peer) timersHandshakeInitiated() {
 	if peer.timersActive() {
@@ -265,8 +273,9 @@ func (peer *Peer) timersHandshakeInitiated() {
 	}
 }
 
-// Should be called after a handshake response message is received and processed
-// or when getting key confirmation via the first data message.
+// Cancels `resendHandshake` after successful handshake.
+// Should be called after a handshake response message is received and
+// processed or when getting key confirmation via the first data message.
 func (peer *Peer) timersHandshakeComplete() {
 	if peer.timersActive() {
 		peer.timers.resendHandshake.Del()
@@ -276,6 +285,7 @@ func (peer *Peer) timersHandshakeComplete() {
 	peer.lastHandshake.Store(time.Now().UnixNano())
 }
 
+// Schedules `zeroOutKeys` timer.
 // Should be called after an ephemeral key is created, which is before
 // sending a handshake response or after receiving a handshake response.
 func (peer *Peer) timersSessionDerived() {

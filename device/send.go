@@ -45,6 +45,7 @@ type QuOutItem struct {
 	// contains whole message
 	buf *[MaxMessageSize]byte
 	// slice of buf containing IP packet
+	// or transport message
 	packet []byte
 	// nonce for encryption
 	nonce uint64
@@ -209,13 +210,19 @@ func (peer *Peer) SendKeepalive() {
 	peer.SendStagedPackets()
 }
 
+// keepKeyFreshSending keeps current keypair
+// fresh when sending packets to peer.
 func (peer *Peer) keepKeyFreshSending() {
 	keypair := peer.keypairs.Current()
 	if keypair == nil {
 		return
 	}
-	nonce := keypair.sendNonce.Load()
-	if nonce > RekeyAfterMessages ||
+	// Only the party that initiated the original connection (initiator)
+	// is responsible for initiating periodic rekeying based on time.
+	// This asymmetric design avoids the "thundering herd" problem where
+	// both sides try to rekey simultaneously, leading to dropped packets
+	// or state confusion.
+	if keypair.sendNonce.Load() > RekeyAfterMessages ||
 		(keypair.isInitiator && time.Since(keypair.createdAt) > RekeyAfterTime) {
 		peer.SendHandshakeInitiation(false)
 	}
@@ -233,14 +240,14 @@ func (d *Device) RoutineReceiveFromInternet() {
 	var (
 		batchSize = d.BatchSize()
 		items     = make([]*QuOutItem, batchSize)
-		// bufs[i] = items[i].buf[:]
-		bufs = make([][]byte, batchSize)
-		// map with peer as a key and a slice of items addressed to it as value
+		// map with peer as key and a slice of items addressed to it as value
 		itemsByPeer = make(map[*Peer]*QuOutItemsWithLock, batchSize)
-		sizes       = make([]int, batchSize)
-		offset      = MessageTransportHeaderSize
-		nPackets    = 0
-		err         error
+		// bufs[i] = items[i].buf[:]
+		bufs     = make([][]byte, batchSize)
+		sizes    = make([]int, batchSize)
+		offset   = MessageTransportHeaderSize
+		nPackets = 0
+		err      error
 	)
 	for i := range items {
 		items[i] = d.NewQuOutItem()
@@ -248,10 +255,8 @@ func (d *Device) RoutineReceiveFromInternet() {
 	}
 	defer func() {
 		for _, item := range items {
-			if item != nil {
-				d.PutMessageBuf(item.buf)
-				d.PutQuOutItem(item)
-			}
+			d.PutMessageBuf(item.buf)
+			d.PutQuOutItem(item)
 		}
 	}()
 	for {
@@ -377,7 +382,6 @@ top:
 		case items := <-peer.qus.staged:
 			i := 0
 			for _, item := range items.items {
-				item.peer = peer
 				// TODO: why do we subtract 1?
 				item.nonce = keypair.sendNonce.Add(1) - 1
 				if item.nonce >= RejectAfterMessages {
@@ -392,12 +396,15 @@ top:
 					i++
 				}
 				item.keypair = keypair
+				item.peer = peer
 			}
-			// unlocked inside RoutineEncryption!
+			// Unlocked inside RoutineEncryption!
 			items.Lock()
 			items.items = items.items[:i]
 			if itemsOutOfOrder != nil {
-				// Out of order, but we can't front-load go channels
+				// Return rejected packets to `qus.staged`. After new
+				// keypair is derived, these packets are sent again.
+				// Out of order, but we can't front-load go channels.
 				peer.StagePackets(itemsOutOfOrder)
 			}
 			if len(items.items) == 0 {
@@ -423,12 +430,12 @@ top:
 // RoutineEncryption encrypts the items in the queue
 // (packets to be sent to peers) and marks them for
 // sequential consumption (by releasing the mutex).
-// There should be one instance per core.
+// There should be one routine per core.
 func (d *Device) RoutineEncryption(id int) {
-	var paddingZeros [PaddingMultiple]byte
-	var nonce [chacha20poly1305.NonceSize]byte
 	defer d.log.Verbosef("Routine: encryption worker %d - stopped", id)
 	d.log.Verbosef("Routine: encryption worker %d - started", id)
+	var paddingZeros [PaddingMultiple]byte
+	var nonce [chacha20poly1305.NonceSize]byte
 	for items := range d.qus.encryption.c {
 		for _, item := range items.items {
 			// populate header fields
@@ -442,16 +449,14 @@ func (d *Device) RoutineEncryption(id int) {
 			// pad content to multiple of 16
 			paddingSize := padding(len(item.packet), int(d.tun.mtu.Load()))
 			item.packet = append(item.packet, paddingZeros[:paddingSize]...)
-			// encrypt content and release to consumer
+			// Encrypt content and release to consumer.
 			// Nonce is padded to 12 bytes. It's needed for explicit alignment
 			// with the ChaCha20 cipher's internal block counter.
 			binary.LittleEndian.PutUint64(nonce[4:], item.nonce)
-			// Seal appends the encrypted message to the header.
-			// `item.buf` is reused here, encrypted message is
-			// saved to the rest of the buf.
-			// (item.buf[:MessageTransportHeaderSize] + encrypted message).
-			// And then saves the encrypted message to `item.packet`.
-			// Whole operation has zero allocations.
+			// Seal appends the encrypted message to the header
+			// (item.buf[:MessageTransportHeaderSize] + encrypted message),
+			// and then saves it to `item.packet`.
+			// item.packet = IP packet -> item.packet = transport message
 			item.packet = item.keypair.encrypt.Seal(
 				header,
 				nonce[:],
@@ -459,7 +464,7 @@ func (d *Device) RoutineEncryption(id int) {
 				nil,
 			)
 		}
-		// locked inside SendStagedPackets!
+		// Locked inside SendStagedPackets!
 		items.Unlock()
 	}
 }
@@ -471,8 +476,7 @@ func (peer *Peer) RoutineSendToPeer(maxBatchSize int) {
 	// taken again from the pool a new mutex is created.
 	device := peer.device
 	defer func() {
-		// without defer, if Done() panicked, the log message wouldn't be printed
-		defer device.log.Verbosef("%v - Routine: sender to peer - stopped", peer)
+		device.log.Verbosef("%v - Routine: sender to peer - stopped", peer)
 		peer.stopping.Done()
 	}()
 	device.log.Verbosef("%v - Routine: sender to peer - started", peer)
@@ -484,18 +488,18 @@ func (peer *Peer) RoutineSendToPeer(maxBatchSize int) {
 			return
 		}
 		if !peer.isRunning.Load() {
-			// peer has been stopped; return re-usable elems to the shared pool.
+			// peer has been stopped; return re-usable items to the shared pool.
 			// This is an optimization only. It is possible for the peer to be stopped
-			// immediately after this check, in which case, elem will get processed.
-			// The timers and SendBuffers code are resilient to a few stragglers.
-			// TODO: rework peer shutdown order to ensure
-			// that we never accidentally keep timers alive longer than necessary.
+			// immediately after this check, in which case, item will get processed.
+			// The timers and Send code are resilient to a few stragglers.
+			// TODO: rework peer shutdown order to ensure that we never
+			// accidentally keep timers alive longer than necessary.
 			items.Lock()
 			device.PutQuOutItems(items)
 			continue
 		}
-		dataSent := false
 		items.Lock()
+		dataSent := false
 		for _, item := range items.items {
 			if len(item.packet) != MessageKeepaliveSize {
 				dataSent = true
