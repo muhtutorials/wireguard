@@ -33,10 +33,11 @@ type QuInItemsWithLock struct {
 	sync.Mutex
 }
 
-// zeroOutPointers zeroes out item fields that contain pointers.
-// This makes the garbage collector's life easier and
-// avoids accidentally keeping other objects around unnecessarily.
-// It also reduces the possible collateral damage from use-after-free bugs.
+// zeroOutPointers zeroes out item fields that contain
+// pointers. This makes the garbage collector's
+// life easier and avoids accidentally keeping other
+// objects around unnecessarily. It also reduces the
+// possible collateral damage from use-after-free bugs.
 func (i *QuInItem) zeroOutPointers() {
 	i.buf = nil
 	i.packet = nil
@@ -95,20 +96,18 @@ func (peer *Peer) keepKeyFreshReceiving() {
 func (d *Device) RoutineReceiveFromPeers(maxBatchSize int, recv conn.ReceiveFunc) {
 	recvName := recv.PrettyName()
 	defer func() {
-		d.log.Verbosef("Routine: receive incoming %s - stopped", recvName)
+		d.log.Verbosef("Routine: receiver from peers %s - stopped", recvName)
 		d.qus.handshake.wg.Done()
 		d.qus.decryption.wg.Done()
 		d.net.stopping.Done()
 	}()
-	d.log.Verbosef("Routine: receive incoming %s - started", recvName)
-	// receive datagrams until conn is closed
+	d.log.Verbosef("Routine: receiver from peers %s - started", recvName)
+	// receive packets until conn is closed
 	var (
 		arrBufs = make([]*[MaxMessageSize]byte, maxBatchSize)
 		// slices of arrBufs
-		bufs  = make([][]byte, maxBatchSize)
-		sizes = make([]int, maxBatchSize)
-		// contains source addresses of packets inside bufs,
-		// or peers' physical addresses (IP address + port)
+		bufs        = make([][]byte, maxBatchSize)
+		sizes       = make([]int, maxBatchSize)
 		endpoints   = make([]conn.Endpoint, maxBatchSize)
 		nPackets    int
 		err         error
@@ -121,9 +120,7 @@ func (d *Device) RoutineReceiveFromPeers(maxBatchSize int, recv conn.ReceiveFunc
 	}
 	defer func() {
 		for i := range maxBatchSize {
-			if arrBufs[i] != nil {
-				d.PutMessageBuf(arrBufs[i])
-			}
+			d.PutMessageBuf(arrBufs[i])
 		}
 	}()
 	for {
@@ -171,8 +168,6 @@ func (d *Device) RoutineReceiveFromPeers(maxBatchSize int, recv conn.ReceiveFunc
 				if keypair.createdAt.Add(RejectAfterTime).Before(time.Now()) {
 					continue
 				}
-				// create work element
-				peer := session.peer
 				item := d.GetQuInItem()
 				item.buf = arrBufs[i]
 				item.packet = packet
@@ -180,10 +175,11 @@ func (d *Device) RoutineReceiveFromPeers(maxBatchSize int, recv conn.ReceiveFunc
 				item.counter = 0
 				item.keypair = keypair
 				item.endpoint = endpoints[i]
+				peer := session.peer
 				itemsForPeer, ok := itemsByPeer[peer]
 				if !ok {
 					itemsForPeer = d.GetQuInItemsWithLock()
-					// unlocked inside RoutineDecryption
+					// Unlocked inside RoutineDecryption!
 					itemsForPeer.Lock()
 					itemsByPeer[peer] = itemsForPeer
 				}
@@ -192,7 +188,7 @@ func (d *Device) RoutineReceiveFromPeers(maxBatchSize int, recv conn.ReceiveFunc
 				arrBufs[i] = d.GetMessageBuf()
 				bufs[i] = arrBufs[i][:]
 				continue
-			// otherwise it is a fixed size & handshake related packet
+			// otherwise it is a fixed size and handshake related packet
 			case MessageInitiationType:
 				if len(packet) != MessageInitiationSize {
 					continue
@@ -234,11 +230,12 @@ func (d *Device) RoutineReceiveFromPeers(maxBatchSize int, recv conn.ReceiveFunc
 }
 
 // RoutineHandshake handles incoming packets related to handshake.
-// Number of routines equals number of cores.
+// Number of routines equals to number of cores.
 func (d *Device) RoutineHandshake(id int) {
 	defer func() {
 		d.log.Verbosef("Routine: handshake worker %d - stopped", id)
-		// TODO: why encryption here?
+		// peer.SendKeepalive() uses encryption queue, so we
+		// need to call d.qus.encryption.wg.Done() here.
 		d.qus.encryption.wg.Done()
 	}()
 	d.log.Verbosef("Routine: handshake worker %d - started", id)
@@ -261,29 +258,28 @@ func (d *Device) RoutineHandshake(id int) {
 			// consume reply
 			if peer := session.peer; peer.isRunning.Load() {
 				d.log.Verbosef(
-					"Receiving cookie response from %s",
+					"Receiving cookie reply from %s",
 					item.endpoint.DstToString(),
 				)
 				// consumed by recipient of cookie
 				if !peer.cookieGenerator.ConsumeReply(&reply) {
-					d.log.Verbosef("Could not decrypt invalid cookie response")
+					d.log.Verbosef("Could not consume cookie reply")
 				}
 			}
 			goto skip
 		case MessageInitiationType, MessageResponseType:
-			// check mac fields and maybe ratelimit
+			// check MAC fields and maybe ratelimit
 			if !d.cookieChecker.CheckMAC1(item.packet) {
 				d.log.Verbosef("Received packet with invalid mac1")
 				goto skip
 			}
-			// endpoints destination address is the source of the datagram
+			// endpoint's destination address is the source of the datagram
 			if d.IsUnderLoad() {
 				// verify MAC2 field
 				if !d.cookieChecker.CheckMAC2(item.packet, item.endpoint.DstToBytes()) {
 					d.SendHandshakeCookie(&item)
 					goto skip
 				}
-				// TODO: is this the only place where ratelimiter used?
 				// check ratelimiter
 				if !d.rateLimiter.val.Allow(item.endpoint.DstIP()) {
 					goto skip
@@ -352,28 +348,29 @@ func (d *Device) RoutineHandshake(id int) {
 			peer.SendKeepalive()
 		}
 	skip:
-		// this buf was taken from pool in RoutineReceiveIncoming
+		// this buf was taken from pool in RoutineReceiveFromPeers
 		d.PutMessageBuf(item.buf)
 	}
 }
 
 // RoutineDecryption is a routine run by device which decrypts packets
-// coming from peers. Number of routines equals number of cores.
+// coming from peers. Number of routines equals to number of cores.
 func (d *Device) RoutineDecryption(id int) {
-	var nonce [chacha20poly1305.NonceSize]byte
 	defer d.log.Verbosef("Routine: decryption worker %d - stopped", id)
 	d.log.Verbosef("Routine: decryption worker %d - started", id)
+	var nonce [chacha20poly1305.NonceSize]byte
 	for items := range d.qus.decryption.c {
 		for _, item := range items.items {
 			// split message into fields
 			counter := item.packet[MessageTransportCounterOffset:MessageTransportContentOffset]
 			content := item.packet[MessageTransportContentOffset:]
-			// decrypt and release to consumer
-			var err error
 			item.counter = binary.LittleEndian.Uint64(counter)
 			// copy counter to nonce
 			binary.LittleEndian.PutUint64(nonce[4:12], item.counter)
-			// item.packet = Type + Receiver + Counter + Content) -> item.packet = Content
+			var err error
+			// Decrypt and release to consumer.
+			// item.packet = Type + Receiver + Counter + Content (encrypted) ->
+			// -> item.packet = Content (decrypted)
 			item.packet, err = item.keypair.decrypt.Open(
 				content[:0],
 				nonce[:],
@@ -381,15 +378,16 @@ func (d *Device) RoutineDecryption(id int) {
 				nil,
 			)
 			if err != nil {
+				// tells RoutineSendToInternet that decryption failed
 				item.packet = nil
 			}
 		}
-		// locked inside RoutineReceiveFromPeers
+		// Locked inside RoutineReceiveFromPeers!
 		items.Unlock()
 	}
 }
 
-// RoutineSendToInternet sends packets to internet (device -> internet).
+// RoutineSendToInternet sends decrypted packets to internet (device -> internet).
 func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 	device := peer.device
 	defer func() {
@@ -403,15 +401,16 @@ func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 		if items == nil {
 			return
 		}
-		// waits for unlock inside RoutineDecryption
+		// waits for lock release by RoutineDecryption
 		items.Lock()
 		// index of the most recent valid packet
 		validTailPacket := -1
 		dataPacketReceived := false
-		rxBytesLen := uint64(0)
+		// amount of bytes received
+		rxBytes := uint64(0)
 		for i, item := range items.items {
 			// item.packet here is a decrypted IP packet (content inside transport message)
-			// received from peer, which is meant to be sent to some website
+			// received from peer, which is meant to be sent to some destination
 			if item.packet == nil {
 				// decryption failed
 				continue
@@ -429,7 +428,7 @@ func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 				peer.SendStagedPackets()
 			}
 			// MinMessageSize = MessageTransportHeaderSize + chacha20poly1305.Overhead
-			rxBytesLen += uint64(len(item.packet) + MinMessageSize)
+			rxBytes += uint64(len(item.packet) + MinMessageSize)
 			if len(item.packet) == 0 {
 				device.log.Verbosef("%v - Receiving keepalive packet", peer)
 				continue
@@ -451,7 +450,10 @@ func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 				// extract source address field from IPv4 packet
 				srcAddr := item.packet[IPv4offsetSrcAddr : IPv4offsetSrcAddr+net.IPv4len]
 				if device.router.Find(srcAddr) != peer {
-					device.log.Verbosef("IPv4 packet with disallowed source address from %v", peer)
+					device.log.Verbosef(
+						"IPv4 packet with disallowed source address from %v",
+						peer,
+					)
 					continue
 				}
 			case 6:
@@ -480,7 +482,7 @@ func (peer *Peer) RoutineSendToInternet(maxBatchSize int) {
 			}
 			bufs = append(bufs, item.buf[:MessageTransportContentOffset+len(item.packet)])
 		}
-		peer.rxBytes.Add(rxBytesLen)
+		peer.rxBytes.Add(rxBytes)
 		if validTailPacket >= 0 {
 			peer.SetEndpointFromPacket(items.items[validTailPacket].endpoint)
 			peer.keepKeyFreshReceiving()

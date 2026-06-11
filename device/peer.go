@@ -210,11 +210,12 @@ func (peer *Peer) Send(bufs [][]byte) error {
 	peer.endpoint.Unlock()
 	err := peer.device.net.bind.Send(bufs, peer.endpoint.val)
 	if err == nil {
-		var totalLen uint64
+		// amount of bytes sent
+		var txBytes uint64
 		for _, buf := range bufs {
-			totalLen += uint64(len(buf))
+			txBytes += uint64(len(buf))
 		}
-		peer.txBytes.Add(totalLen)
+		peer.txBytes.Add(txBytes)
 	}
 	return err
 }

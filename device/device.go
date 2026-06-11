@@ -157,7 +157,8 @@ func NewDevice(bind conn.Bind, tunDevice tun.Device, logger *Logger) *Device {
 	d.log = logger
 	// start workers
 	numCPU := runtime.NumCPU()
-	d.qus.encryption.wg.Add(numCPU) // one for each RoutineHandshake
+	// one for each RoutineHandshake
+	d.qus.encryption.wg.Add(numCPU)
 	// Ensures that when the device is reinitialized, all previous
 	// goroutines have fully exited before new ones are launched.
 	d.state.stopping.Wait()
