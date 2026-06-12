@@ -260,10 +260,17 @@ func (d *Device) handlePublicKeyLine(peer *ipcSetPeer, pubKey string) error {
 
 func (d *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error {
 	switch key {
-	// TODO: not completely clear why this case is needed
+	// Prevents creation of a new peer, only allowing updates to existing ones.
+	// How update_only works:
+	// Initial Creation: The handler for the public_key line in
+	// 	handlePublicKeyLine() sees the peer doesn't exist and
+	// 	automatically creates it.
+	// Safety Check: When the parser later reads update_only=true,
+	// 	the handlePeerLine() logic realizes the peer was freshly
+	// 	created in this very operation (peer.new == true). It then
+	// 	deletes this newly created peer and marks it as a dummy to
+	// 	make the overall operation a no-op.
 	case "update_only":
-		// prevents creation of a new peer,
-		// only allowing updates to existing ones
 		if value != "true" {
 			return ipcErrorf(
 				ipc.IpcErrorInvalid,

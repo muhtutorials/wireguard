@@ -328,8 +328,7 @@ func (d *Device) routineRouteListener(
 						}
 						if nativeEndpoint.DstIP().Is6() || nativeEndpoint.SrcIfidx() == 0 {
 							peer.endpoint.Unlock()
-							// TODO: why do we break and not continue?
-							break
+							continue
 						}
 						nlmsg := netlinkMsg{
 							hdr: unix.NlMsghdr{

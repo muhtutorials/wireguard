@@ -312,7 +312,7 @@ func (b *NetBind) receive(
 			continue
 		}
 		addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
-		endpoint := &NetEndpoint{AddrPort: addrPort} // TODO: remove allocation
+		endpoint := &NetEndpoint{AddrPort: addrPort}
 		// fills endpoint.src field
 		getSrcFromControl(msg.OOB[:msg.NN], endpoint)
 		endpoints[i] = endpoint

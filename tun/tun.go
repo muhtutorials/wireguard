@@ -619,14 +619,6 @@ func handleVirtioRead(
 			hdr.hdrLen,
 		)
 	}
-	// TODO: defensive programming?
-	if hdr.hdrLen < hdr.csumStart {
-		return 0, fmt.Errorf(
-			"virtioNetHdr.hdrLen (%d) < virtioNetHdr.csumStart (%d)",
-			hdr.hdrLen,
-			hdr.csumStart,
-		)
-	}
 	checksumAt := int(hdr.csumStart + hdr.csumOffset)
 	// check if checksum field is inside `readBuf`
 	if checksumAt+1 >= len(readBuf) {

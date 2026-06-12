@@ -158,7 +158,6 @@ func (peer *Peer) SendHandshakeResponse() error {
 	peer.timersSessionDerived()
 	peer.timersAuthenticatedPacketTraversal()
 	peer.timersAuthenticatedPacketSent()
-	// TODO: allocation could be avoided
 	if err = peer.Send([][]byte{buf}); err != nil {
 		peer.device.log.Errorf(
 			"%v - Failed to send handshake response: %v",
@@ -186,7 +185,6 @@ func (d *Device) SendHandshakeCookie(hs *QuHandshake) error {
 	}
 	buf := make([]byte, MessageCookieReplySize)
 	_ = msg.marshal(buf)
-	// TODO: allocation could be avoided
 	d.net.bind.Send([][]byte{buf}, hs.endpoint)
 	return nil
 }
@@ -314,7 +312,6 @@ func (d *Device) RoutineReceiveFromInternet() {
 		}
 		if err != nil {
 			if errors.Is(err, tun.ErrTooManySegments) {
-				// TODO: record stat for this
 				// This will happen if MSS is surprisingly small (< 576)
 				// coincident with reasonably high throughput.
 				d.log.Verbosef("Dropped some packets from multi-segment read: %v", err)
@@ -369,7 +366,6 @@ top:
 		return
 	}
 	keypair := peer.keypairs.Current()
-	// TODO: keypair == nil (ZeroAndFlushAll) vs RejectAfterMessages (ExpireCurrentKeypairs)
 	if keypair == nil ||
 		keypair.sendNonce.Load() >= RejectAfterMessages ||
 		time.Since(keypair.createdAt) >= RejectAfterTime {
@@ -382,8 +378,10 @@ top:
 		case items := <-peer.qus.staged:
 			i := 0
 			for _, item := range items.items {
-				// TODO: why do we subtract 1?
+				// set `item.nonce` to current `keypair.sendNonce`
+				// value and increment `keypair.sendNonce` by one
 				item.nonce = keypair.sendNonce.Add(1) - 1
+				// second `nonce >= RejectAfterMessages` check avoids race condition
 				if item.nonce >= RejectAfterMessages {
 					keypair.sendNonce.Store(RejectAfterMessages)
 					if itemsOutOfOrder == nil {
@@ -492,8 +490,6 @@ func (peer *Peer) RoutineSendToPeer(maxBatchSize int) {
 			// This is an optimization only. It is possible for the peer to be stopped
 			// immediately after this check, in which case, item will get processed.
 			// The timers and Send code are resilient to a few stragglers.
-			// TODO: rework peer shutdown order to ensure that we never
-			// accidentally keep timers alive longer than necessary.
 			items.Lock()
 			device.PutQuOutItems(items)
 			continue

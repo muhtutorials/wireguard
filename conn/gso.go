@@ -79,9 +79,7 @@ func setGSOSize(control *[]byte, gsoSize uint16) {
 	if space > available {
 		return
 	}
-	// TODO: not sure why it isn't `*control = (*control)[:length+space]`.
-	// Defensive programming?
-	*control = (*control)[:capacity]
+	*control = (*control)[:length+space]
 	gsoControl := (*control)[length:]
 	hdr := (*unix.Cmsghdr)(unsafe.Pointer(&gsoControl[0]))
 	hdr.Level = unix.SOL_UDP
@@ -99,5 +97,4 @@ func setGSOSize(control *[]byte, gsoSize uint16) {
 		gsoControl[unix.CmsgLen(0):],
 		unsafe.Slice((*byte)(unsafe.Pointer(&gsoSize)), gsoDataLen),
 	)
-	*control = (*control)[:length+space]
 }

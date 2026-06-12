@@ -92,8 +92,6 @@ func (v *virtioNetHdr) decode(b []byte) error {
 	return nil
 }
 
-// TODO: why do we need to sort packet by flow,
-// why not just send them randomly in batches?
 // tcpFlowKey represents the key for a TCP flow.
 type tcpFlowKey struct {
 	srcAddr, dstAddr [16]byte
@@ -201,8 +199,6 @@ func (t *tcpGROTable) getOrInsert(
 	if ok {
 		return items, ok
 	}
-	// TODO: insert() performs another map lookup.
-	// This could be rearranged to avoid.
 	t.insert(pkt, srcAddrOffset, dstAddrOffset, tcphOffset, tcphLen, bufsIndex)
 	return nil, false
 }
@@ -235,14 +231,16 @@ func (t *tcpGROTable) insert(
 	t.itemsByFlow[key] = items
 }
 
-// TODO: why no check for existence?
 func (t *tcpGROTable) updateAt(item tcpGROItem, i int) {
+	// no check for item existence and if `i` is inside range,
+	// because the caller is expected to have already verified it
 	items, _ := t.itemsByFlow[item.key]
 	items[i] = item
 }
 
-// TODO: why no check for existence?
 func (t *tcpGROTable) deleteAt(key tcpFlowKey, i int) {
+	// no check for item existence and if `i` is inside range,
+	// because the caller is expected to have already verified it
 	items, _ := t.itemsByFlow[key]
 	items = append(items[:i], items[i+1:]...)
 	t.itemsByFlow[key] = items
@@ -343,8 +341,6 @@ func (u *udpGROTable) getOrInsert(
 	if ok {
 		return items, ok
 	}
-	// TODO: insert() performs another map lookup.
-	// This could be rearranged to avoid.
 	u.insert(pkt, srcAddrOffset, dstAddrOffset, udphOffset, bufsIndex, false)
 	return nil, false
 }

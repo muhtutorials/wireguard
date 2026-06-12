@@ -65,10 +65,10 @@ const (
 	// size of fields preceding content field in MessageTransport
 	// (uint32 + uint32 + uint64 = 16 byte)
 	MessageTransportHeaderSize = 16
-	// size of empty transport message
-	// TODO: what is chacha20poly1305.Overhead?
+	// Size of empty transport message.
+	// chacha20poly1305.Overhead (16 bytes) is the size of the
+	// authentication tag that is appended to the encrypted data.
 	MessageTransportSize = MessageTransportHeaderSize + chacha20poly1305.Overhead
-	// size of keepalive (MessageTransportHeaderSize + chacha20poly1305.Overhead)
 	MessageKeepaliveSize = MessageTransportSize
 )
 

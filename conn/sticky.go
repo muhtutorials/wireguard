@@ -126,9 +126,6 @@ func (e *NetEndpoint) SrcIP() netip.Addr {
 		return netip.AddrFrom4(info.Spec_dst)
 	case unix.CmsgSpace(unix.SizeofInet6Pktinfo):
 		info := (*unix.Inet6Pktinfo)(unsafe.Pointer(&e.src[unix.CmsgLen(0)]))
-		// TODO: set zone. in order to do so we need to check if the address is
-		// link local, and if it is perform a syscall to turn the ifindex into a
-		// zone string because netip uses string zones.
 		return netip.AddrFrom16(info.Addr)
 	}
 	return netip.Addr{}

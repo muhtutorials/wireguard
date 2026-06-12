@@ -59,7 +59,7 @@ func (r *RateLimiter) Init() {
 			select {
 			case _, ok := <-stopOrReset:
 				if !ok {
-					// channel is closed, stop rate limiter
+					// channel is closed, stop ratelimiter
 					return
 				}
 				// received on channel, restart ticker
@@ -89,7 +89,6 @@ func (r *RateLimiter) cleanup() (empty bool) {
 }
 
 func (r *RateLimiter) Allow(ip netip.Addr) bool {
-	// TODO: race condition
 	// get or create entry
 	r.mu.RLock()
 	entry, ok := r.table[ip]

@@ -154,8 +154,8 @@ func (rw *RWCancel) Cancel() error {
 	return err
 }
 
-// TODO: why don't we close `rw.fd` here?
 func (rw *RWCancel) Close() {
+	// NOTE: `rw.fd` is left for the caller to close
 	rw.r.Close()
 	rw.w.Close()
 }

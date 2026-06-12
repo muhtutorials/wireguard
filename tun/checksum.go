@@ -108,6 +108,9 @@ func checksumNoFold(b []byte, initial uint64) uint64 {
 		// The checksum algorithm operates on 16-bit words (2 bytes at a time).
 		// When an odd number of bytes remains (exactly 1 byte left),
 		// it must be padded to 16 bits.
+		// `[]byte{b[0], 0}` is just raw bytes being checksummed.
+		// Order doesn't matter (if zero is first or second byte)
+		// as long as it's consistent.
 		tmp := binary.NativeEndian.Uint16([]byte{b[0], 0})
 		ac, carry = bits.Add64(ac, uint64(tmp), 0)
 		ac += carry
@@ -137,9 +140,8 @@ func pseudoHeaderChecksumNoFold(
 	// to a 16-bit value for checksum calculation:
 	//  - High byte (bits 15–8): 0
 	//  - Low byte (bits 7–0): protocol number
-	// TODO: The order differs from the one in `checksumNoFold`:
-	// 	binary.NativeEndian.Uint16([]byte{b[0], 0}).
-	// Not sure why.
+	// `[]byte{0, protocol}` must match the network byte
+	// order (big-endian) specified by the RFC.
 	sum = checksumNoFold([]byte{0, protocol}, sum)
 	tmp := make([]byte, 2)
 	// convert uint16 to []byte
